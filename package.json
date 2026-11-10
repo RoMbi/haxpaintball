@@ -1,0 +1,12 @@
+{
+  "name": "haxpaintball",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node shared/sim.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

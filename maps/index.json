@@ -1,0 +1,47 @@
+[
+  {
+    "id": "small-cross",
+    "name": "Mała — krzyż",
+    "file": "small-cross.json"
+  },
+  {
+    "id": "small-alley",
+    "name": "Mała — aleja",
+    "file": "small-alley.json"
+  },
+  {
+    "id": "small-bunker",
+    "name": "Mała — bunkry",
+    "file": "small-bunker.json"
+  },
+  {
+    "id": "medium-cross",
+    "name": "Średnia — krzyż",
+    "file": "medium-cross.json"
+  },
+  {
+    "id": "medium-alley",
+    "name": "Średnia — aleja",
+    "file": "medium-alley.json"
+  },
+  {
+    "id": "medium-bunker",
+    "name": "Średnia — bunkry",
+    "file": "medium-bunker.json"
+  },
+  {
+    "id": "large-cross",
+    "name": "Duża — krzyż",
+    "file": "large-cross.json"
+  },
+  {
+    "id": "large-alley",
+    "name": "Duża — aleja",
+    "file": "large-alley.json"
+  },
+  {
+    "id": "large-bunker",
+    "name": "Duża — bunkry",
+    "file": "large-bunker.json"
+  }
+]

@@ -1,0 +1,11 @@
+# Project exclude paths
+/.proxyai/
+/scripts/
+/dist/
+/node_modules/
+/node_modules/ws/browser.js
+/node_modules/ws/LICENSE
+/node_modules/ws/README.md
+/docs/superpowers/
+/plan/
+/.idea/

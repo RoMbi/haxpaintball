@@ -1,0 +1,8 @@
+.git
+.idea
+.proxyai
+dist
+node_modules
+PLAN.md
+*.log
+.DS_Store
