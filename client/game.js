@@ -8,6 +8,16 @@ import {
   TEAM_RED,
   TEAM_BLUE,
   TEAM_SPEC,
+  PLAYER_RADIUS,
+  BULLET_RADIUS,
+  BULLET_SPEED,
+  BULLET_INHERIT,
+  BULLET_LIFE,
+  BULLET_COOLDOWN,
+  BULLET_TAP_RATE,
+  MARKER_ALONG,
+  MARKER_RIGHT,
+  MARKER_TIP,
 } from '../shared/constants.js';
 import {
   createMatch,
@@ -46,6 +56,9 @@ const INPUT_HISTORY = 32;
 // Own disc is predicted. Error under this blends in. Past it, the disc is wrong enough to snap.
 const CORRECT_BLEND = 0.3;
 const CORRECT_SNAP = 80;
+// Own shot is drawn from the muzzle on the tick the key went down.
+// The referee copy of that shot is already in the past, so it is not drawn.
+const LOCAL_BULLETS = 8;
 
 const canvas = document.querySelector('#view');
 const lobbyEl = document.querySelector('#lobby');
@@ -109,6 +122,9 @@ let delayQuietSince = 0;
 // Local body for anyone who is not the referee. Rendered live, corrected from snapshots.
 let predicted = null;
 let predictedAck = 0;
+let localBullets = [];
+let triggerWasDown = false;
+let shotCooldown = 0;
 
 const metrics = createClientMetrics();
 const net = createNet({
@@ -374,6 +390,7 @@ function resetLocalMatch() {
   seenDeathId = 0;
   predicted = null;
   predictedAck = 0;
+  clearLocalShots();
   showLobby(true);
 }
 
@@ -729,7 +746,7 @@ function buildView() {
     return {
       map: visibleMap,
       players,
-      bullets: span ? drawBulletsFromSpan(span) : [],
+      bullets: span ? drawOwnShots(drawBulletsFromSpan(span)) : localBullets.slice(),
       paint,
       selfId,
       los: true,
@@ -860,11 +877,90 @@ function stepPredicted(mask) {
   if (pickedTeam === TEAM_SPEC) return;
   applyInput(predicted, mask, DT);
   integratePlayer(predicted, map, DT);
+  fireLocal(mask);
+}
+
+function clearLocalShots() {
+  localBullets = [];
+  triggerWasDown = false;
+  shotCooldown = 0;
+}
+
+function fireLocal(mask) {
+  const shooting = (mask & KEY.SHOOT) !== 0;
+  shotCooldown = Math.max(0, shotCooldown - DT);
+  if (!shooting) {
+    triggerWasDown = false;
+    return;
+  }
+  if (triggerWasDown || shotCooldown > 0) return;
+  if (!predicted || !predicted.alive) return;
+  const remote = latestSnap && findSnapPlayer(latestSnap, selfId);
+  if (remote && (remote.reloading || remote.ammo === 0 || remote.alive === false)) return;
+  if (remote && remote.invuln > 0) return;
+  const shot = muzzleShot(predicted);
+  if (!shot) return;
+  localBullets.push(shot);
+  while (localBullets.length > LOCAL_BULLETS) localBullets.shift();
+  triggerWasDown = true;
+  shotCooldown = BULLET_TAP_RATE;
+}
+
+function muzzleShot(body) {
+  let fx = body.fx;
+  let fy = body.fy;
+  const flen = Math.hypot(fx, fy);
+  if (flen < 1e-8) {
+    fx = 1;
+    fy = 0;
+  } else {
+    fx /= flen;
+    fy /= flen;
+  }
+  const gripX = body.x + fx * PLAYER_RADIUS * MARKER_ALONG - fy * PLAYER_RADIUS * MARKER_RIGHT;
+  const gripY = body.y + fy * PLAYER_RADIUS * MARKER_ALONG + fx * PLAYER_RADIUS * MARKER_RIGHT;
+  const muzzle = MARKER_TIP + BULLET_RADIUS + 1;
+  return {
+    local: true,
+    owner: selfId,
+    team: body.team || pickedTeam,
+    x: gripX + fx * muzzle,
+    y: gripY + fy * muzzle,
+    vx: fx * BULLET_SPEED + body.vx * BULLET_INHERIT,
+    vy: fy * BULLET_SPEED + body.vy * BULLET_INHERIT,
+    life: BULLET_LIFE,
+    angle: 0,
+  };
+}
+
+function stepLocalBullets() {
+  if (!localBullets.length) return;
+  const kept = [];
+  for (const bullet of localBullets) {
+    bullet.life -= DT;
+    if (bullet.life <= 0) continue;
+    bullet.x += bullet.vx * DT;
+    bullet.y += bullet.vy * DT;
+    kept.push(bullet);
+  }
+  localBullets = kept;
+}
+
+// Referee copies of our shots spawn where we were, not where we are. Drop them.
+function drawOwnShots(remote) {
+  stepLocalBullets();
+  const others = [];
+  for (const bullet of remote) {
+    if (bullet.owner === selfId) continue;
+    others.push(bullet);
+  }
+  return others.concat(localBullets);
 }
 
 function stepGuest() {
   if (pickedTeam === TEAM_SPEC) {
     predicted = null;
+    clearLocalShots();
     if (seenEventId > sentAck) {
       sentAck = seenEventId;
       net.sendInput(inputSeq, 0, seenEventId);
@@ -903,6 +999,9 @@ function onWelcome(state) {
   delayQuietSince = 0;
   predicted = null;
   predictedAck = 0;
+  localBullets = [];
+  triggerWasDown = false;
+  shotCooldown = 0;
   latestSnap = null;
   latestSnapAt = 0;
   snapBuffer = [];
@@ -985,8 +1084,10 @@ function onGame(msg, fromId) {
 function adoptPrediction(snap) {
   if (pickedTeam === TEAM_SPEC) {
     predicted = null;
+    clearLocalShots();
     return;
   }
+  if (snap.phase !== 'playing') clearLocalShots();
   const remote = findSnapPlayer(snap, selfId);
   if (!remote) return;
   const ack = remote.ack | 0;
