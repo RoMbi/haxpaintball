@@ -54,9 +54,8 @@ const INTERP_DELAY_MAX = 0.15;
 const INTERP_QUIET_MS = 2000;
 const SNAP_BUFFER = 32;
 const INPUT_HISTORY = 32;
-// Own disc is predicted. A snapshot is the past; unacked masks are replayed on top.
-// Leftover error is drawn, then eased out. Past the snap it is a real desync.
-const CORRECT_BLEND = 0.3;
+// Own disc is predicted. A snapshot is the past; only masks after it are replayed.
+// Past this the replay and the live body disagree hard enough to snap (spawn, shove).
 const CORRECT_SNAP = 80;
 // Own shot is drawn from the muzzle on the tick the key went down.
 // The referee copy of that shot is already in the past, so it is not drawn.
@@ -124,8 +123,8 @@ let delayQuietSince = 0;
 // Local body for anyone who is not the referee. Rendered live, corrected from snapshots.
 let predicted = null;
 let predictedAck = 0;
-// Drawn offset only. Physics always sits on the replayed pose.
-let visualError = null;
+// Last input the live body has already stepped. Replay must not step it again.
+let predictedSeq = 0;
 let localBullets = [];
 let triggerWasDown = false;
 let shotCooldown = 0;
@@ -394,7 +393,7 @@ function resetLocalMatch() {
   seenDeathId = 0;
   predicted = null;
   predictedAck = 0;
-  visualError = null;
+  predictedSeq = 0;
   clearLocalShots();
   showLobby(true);
 }
@@ -823,25 +822,10 @@ function seedPredicted(raw) {
   return body;
 }
 
-function decayVisualError(now) {
-  if (!visualError) return;
-  const at = now || performance.now();
-  if (visualError.at === at) return;
-  visualError.at = at;
-  visualError.x *= 1 - CORRECT_BLEND;
-  visualError.y *= 1 - CORRECT_BLEND;
-  if (visualError.x * visualError.x + visualError.y * visualError.y < 0.25) visualError = null;
-}
-
 function drawPredicted() {
   const known = rosterOf(selfId);
-  decayVisualError(performance.now());
-  const ox = visualError ? visualError.x : 0;
-  const oy = visualError ? visualError.y : 0;
   return {
     ...predicted,
-    x: predicted.x + ox,
-    y: predicted.y + oy,
     id: selfId,
     nick: known ? known.nick : (predicted.nick || ''),
     team: known && known.team ? known.team : (predicted.team || pickedTeam),
@@ -860,7 +844,6 @@ function correctPredicted(remote) {
     predicted.y = remote.y;
     predicted.vx = 0;
     predicted.vy = 0;
-    visualError = null;
     metrics.noteReconcile(0);
     return;
   }
@@ -871,28 +854,25 @@ function correctPredicted(remote) {
   const field = predictMap();
   const body = seedPredicted(remote);
   if (!body || !field) return;
-  // Server steps one mask per tick. A hole in ack is time the referee did not
-  // simulate, not masks we should run again on top of an already-moved pose.
-  const pending = Math.max(0, inputSeq - (predictedAck | 0));
-  replayUnacked(body, field, pending);
+  // Replay only masks the live body has not stepped. inputSeq - ack counts
+  // ticks still sitting in the send buffer, and stepping those again yanks
+  // the disc back to where it was a round-trip ago.
+  const ahead = Math.max(0, predictedSeq - (predictedAck | 0));
+  replayUnacked(body, field, ahead);
   const dx = body.x - predicted.x;
   const dy = body.y - predicted.y;
   const err = Math.hypot(dx, dy);
   metrics.noteReconcile(err);
-  // Authority is the replay, not the live body. Leaving a large error in place
-  // makes the next snapshot miss by the same amount, so the jump never decays.
-  predicted.x = body.x;
-  predicted.y = body.y;
-  predicted.vx = body.vx;
-  predicted.vy = body.vy;
-  predicted.fx = body.fx;
-  predicted.fy = body.fy;
+  // Small error is rounding and a shove the replay cannot see. Snapping the
+  // live body to the replay every snapshot is the stutter. A real desync
+  // (spawn, wall) is the only time the disc is allowed to move.
   if (err >= CORRECT_SNAP) {
-    visualError = null;
-  } else if (err > 0.5) {
-    visualError = { x: -dx, y: -dy, at: 0 };
-  } else {
-    visualError = null;
+    predicted.x = body.x;
+    predicted.y = body.y;
+    predicted.vx = body.vx;
+    predicted.vy = body.vy;
+    predicted.fx = body.fx;
+    predicted.fy = body.fy;
   }
   if (remote.invuln != null) predicted.invuln = Number(remote.invuln) || 0;
 }
@@ -922,6 +902,7 @@ function stepPredicted(mask) {
   const field = predictMap();
   if (!predicted || !predicted.alive || !field) return;
   if (pickedTeam === TEAM_SPEC) return;
+  predictedSeq = inputSeq;
   applyInput(predicted, mask, DT);
   if (map) integratePlayer(predicted, field, DT);
   else {
@@ -1011,7 +992,7 @@ function drawOwnShots(remote) {
 function stepGuest() {
   if (pickedTeam === TEAM_SPEC) {
     predicted = null;
-    visualError = null;
+    predictedSeq = 0;
     clearLocalShots();
     if (seenEventId > sentAck) {
       sentAck = seenEventId;
@@ -1051,7 +1032,7 @@ function onWelcome(state) {
   delayQuietSince = 0;
   predicted = null;
   predictedAck = 0;
-  visualError = null;
+  predictedSeq = 0;
   localBullets = [];
   triggerWasDown = false;
   shotCooldown = 0;
@@ -1133,10 +1114,17 @@ function onGame(msg, fromId) {
   }
 }
 
+function spawnedAway(local, remote) {
+  if (!local || !remote || remote.alive === false) return false;
+  const dx = remote.x - local.x;
+  const dy = remote.y - local.y;
+  return dx * dx + dy * dy >= CORRECT_SNAP * CORRECT_SNAP;
+}
+
 function adoptPrediction(snap) {
   if (pickedTeam === TEAM_SPEC) {
     predicted = null;
-    visualError = null;
+    predictedSeq = 0;
     clearLocalShots();
     return;
   }
@@ -1145,23 +1133,17 @@ function adoptPrediction(snap) {
   if (!remote) return;
   const ack = Number.isFinite(Number(remote.ack)) ? remote.ack | 0 : predictedAck;
   dropAckedInputs(ack);
-  if (!predicted) {
+  // A new round puts the disc on a spawn. The live body is still at the old
+  // spot, and replaying unacked masks from there is the delayed lunge.
+  if (!predicted || !predicted.alive || remote.alive === false || snap.tick <= 2) {
     predicted = seedPredicted(remote);
+    predictedSeq = predictedAck;
     return;
   }
-  if (remote.alive === false) {
-    predicted.alive = false;
-    predicted.x = remote.x;
-    predicted.y = remote.y;
-    predicted.vx = 0;
-    predicted.vy = 0;
-    visualError = null;
+  if (spawnedAway(predicted, remote)) {
+    predicted = seedPredicted(remote);
+    predictedSeq = predictedAck;
     metrics.noteReconcile(0);
-    return;
-  }
-  if (!predicted.alive) {
-    predicted = seedPredicted(remote);
-    visualError = null;
     return;
   }
   correctPredicted(remote);
