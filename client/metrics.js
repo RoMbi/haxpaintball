@@ -35,6 +35,10 @@ export function createClientMetrics() {
   let hardSnaps = 0;
   let reconcileChecks = 0;
   let maxSnapPx = 0;
+  let maxAhead = 0;
+  let reconcilePhase = '';
+  let reconcileAlive = '';
+  let reconcileWhere = '';
   let snapAgeMs = 0;
   let snapBuffer = 0;
   let hasSnap = false;
@@ -98,6 +102,12 @@ export function createClientMetrics() {
       hardSnaps ? 'HARD' : 'ok',
       '| max jump',
       maxSnapPx.toFixed(1) + 'px',
+      '| ahead',
+      String(maxAhead),
+      '| at',
+      reconcileWhere || '-',
+      reconcilePhase || '-',
+      reconcileAlive || '-',
     ].join(' ');
   }
 
@@ -136,11 +146,19 @@ export function createClientMetrics() {
       if (sample.snapBuffer != null) snapBuffer = sample.snapBuffer | 0;
     },
 
-    // Distance in px of a predicted-vs-snapshot correction. Counts jumps over 8 px.
-    noteReconcile(px) {
+    // Distance in px of a predicted-vs-replay correction. Counts jumps over 8 px.
+    // detail is only stored for the worst jump in the report window.
+    noteReconcile(px, detail) {
       if (!Number.isFinite(px)) return;
       reconcileChecks += 1;
-      if (px > maxSnapPx) maxSnapPx = px;
+      if (px > maxSnapPx) {
+        maxSnapPx = px;
+        const info = detail || {};
+        maxAhead = info.ahead | 0;
+        reconcilePhase = info.phase || '';
+        reconcileAlive = info.alive || '';
+        reconcileWhere = info.where || '';
+      }
       if (px > HARD_SNAP_PX) hardSnaps += 1;
     },
 
@@ -156,6 +174,10 @@ export function createClientMetrics() {
       hardSnaps = 0;
       reconcileChecks = 0;
       maxSnapPx = 0;
+      maxAhead = 0;
+      reconcilePhase = '';
+      reconcileAlive = '';
+      reconcileWhere = '';
     },
   };
 }

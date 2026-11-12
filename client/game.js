@@ -848,19 +848,22 @@ function drawPredicted() {
 // Snapshot pose is where we were when the referee consumed ack. Replaying the
 // masks after that is where we should be now. Comparing the live body to the
 // snapshot measures lag, not error, and a snap there never converges.
+function reconcileDetail(where, remote, ahead) {
+  const phase = latestSnap && latestSnap.phase ? latestSnap.phase : '';
+  const localAlive = predicted && predicted.alive ? 'L' : 'l';
+  const remoteAlive = remote && remote.alive !== false ? 'R' : 'r';
+  return { where, phase, alive: localAlive + remoteAlive, ahead: ahead | 0 };
+}
+
 function correctPredicted(remote) {
   if (!predicted || !remote) return;
-  if (remote.alive === false) {
-    predicted.alive = false;
-    predicted.x = remote.x;
-    predicted.y = remote.y;
+  if (remote.alive === false || !predicted.alive) {
+    predicted = seedPredicted(remote);
+    predicted.alive = remote.alive !== false;
     predicted.vx = 0;
     predicted.vy = 0;
-    metrics.noteReconcile(0);
-    return;
-  }
-  if (!predicted.alive) {
-    predicted = seedPredicted(remote);
+    predictedSeq = predictedAck;
+    metrics.noteReconcile(0, reconcileDetail('dead', remote, 0));
     return;
   }
   const field = predictMap();
@@ -874,7 +877,7 @@ function correctPredicted(remote) {
   const dx = body.x - predicted.x;
   const dy = body.y - predicted.y;
   const err = Math.hypot(dx, dy);
-  metrics.noteReconcile(err);
+  metrics.noteReconcile(err, reconcileDetail('replay', remote, ahead));
   // Small error is rounding and a shove the replay cannot see. Snapping the
   // live body to the replay every snapshot is the stutter. A real desync
   // (spawn, wall) is the only time the disc is allowed to move.
@@ -1014,7 +1017,8 @@ function stepGuest() {
     return;
   }
   inputSeq += 1;
-  const mask = rememberInput(inputSeq, wasd.sample());
+  const down = latestSnap && latestSnap.phase === 'playing' && predicted && predicted.alive;
+  const mask = rememberInput(inputSeq, down ? wasd.sample() : 0);
   sentAck = seenEventId;
   net.sendInput(inputSeq, mask, seenEventId);
   stepPredicted(mask);
@@ -1157,13 +1161,15 @@ function adoptPrediction(snap) {
   if (!predicted || !predicted.alive || remote.alive === false || snap.phase !== 'playing' || snap.tick <= 2 || respawned) {
     predicted = seedPredicted(remote);
     predictedSeq = predictedAck;
-    metrics.noteReconcile(0);
+    metrics.noteReconcile(0, reconcileDetail('reset', remote, 0));
     return;
   }
   if (spawnedAway(predicted, remote)) {
+    const dx = remote.x - predicted.x;
+    const dy = remote.y - predicted.y;
     predicted = seedPredicted(remote);
     predictedSeq = predictedAck;
-    metrics.noteReconcile(0);
+    metrics.noteReconcile(Math.hypot(dx, dy), reconcileDetail('spawn', remote, 0));
     return;
   }
   correctPredicted(remote);
