@@ -18,6 +18,8 @@ import {
   canStart,
   start,
   pauseMatch,
+  applyInput,
+  integratePlayer,
   step,
 } from './host.js';
 import { MAP_WASD, MAP_IJKL, createInput } from './input.js';
@@ -41,6 +43,9 @@ const INTERP_DELAY_MAX = 0.15;
 const INTERP_QUIET_MS = 2000;
 const SNAP_BUFFER = 32;
 const INPUT_HISTORY = 32;
+// Own disc is predicted. Error under this blends in. Past it, the disc is wrong enough to snap.
+const CORRECT_BLEND = 0.3;
+const CORRECT_SNAP = 80;
 
 const canvas = document.querySelector('#view');
 const lobbyEl = document.querySelector('#lobby');
@@ -101,6 +106,9 @@ let seenDeathId = 0;
 let hostEventAcks = new Map();
 let renderDelay = INTERP_DELAY * 1000;
 let delayQuietSince = 0;
+// Local body for anyone who is not the referee. Rendered live, corrected from snapshots.
+let predicted = null;
+let predictedAck = 0;
 
 const metrics = createClientMetrics();
 const net = createNet({
@@ -364,6 +372,8 @@ function resetLocalMatch() {
   paint = [];
   seenEventId = 0;
   seenDeathId = 0;
+  predicted = null;
+  predictedAck = 0;
   showLobby(true);
 }
 
@@ -701,13 +711,24 @@ function fieldVisible() {
   return !!(match && (match.phase === 'playing' || match.phase === 'round_end'));
 }
 
+function needsPrediction() {
+  return mode === 'guest' || serverHost;
+}
+
 function buildView() {
   const visibleMap = fieldVisible() ? map : null;
-  if ((mode === 'guest' || serverHost) && latestSnap) {
+  if (needsPrediction() && latestSnap) {
     const span = interpSpan(performance.now());
+    const players = span ? drawPlayersFromSpan(span) : [];
+    if (predicted && predicted.alive) {
+      const idx = players.findIndex((player) => player.id === selfId);
+      const body = drawPredicted();
+      if (idx >= 0) players[idx] = body;
+      else players.push(body);
+    }
     return {
       map: visibleMap,
-      players: span ? drawPlayersFromSpan(span) : [],
+      players,
       bullets: span ? drawBulletsFromSpan(span) : [],
       paint,
       selfId,
@@ -762,8 +783,88 @@ function rememberInput(seq, mask) {
   return bits;
 }
 
+function dropAckedInputs(ack) {
+  const confirmed = ack | 0;
+  if (confirmed > predictedAck) predictedAck = confirmed;
+  while (sentInputs.length && sentInputs[0].seq <= predictedAck) sentInputs.shift();
+}
+
+function seedPredicted(raw) {
+  const body = hydratePlayer(raw);
+  if (!body) return null;
+  body.alive = raw.alive !== false;
+  body.vx = Number(raw.vx) || 0;
+  body.vy = Number(raw.vy) || 0;
+  body.invuln = Number(raw.invuln) || 0;
+  body.cooldown = 0;
+  body.triggerWasDown = false;
+  return body;
+}
+
+function drawPredicted() {
+  const known = rosterOf(selfId);
+  return {
+    ...predicted,
+    id: selfId,
+    nick: known ? known.nick : (predicted.nick || ''),
+    team: known && known.team ? known.team : (predicted.team || pickedTeam),
+    facing: facingOf(predicted.fx, predicted.fy),
+  };
+}
+
+function correctPredicted(remote) {
+  if (!predicted || !remote) return;
+  if (remote.alive === false) {
+    predicted.alive = false;
+    predicted.x = remote.x;
+    predicted.y = remote.y;
+    predicted.vx = 0;
+    predicted.vy = 0;
+    return;
+  }
+  if (!predicted.alive) {
+    predicted = seedPredicted(remote);
+    return;
+  }
+  const dx = remote.x - predicted.x;
+  const dy = remote.y - predicted.y;
+  const err = Math.hypot(dx, dy);
+  metrics.noteReconcile(err);
+  // Velocity stays local. Snapshot vx is rounded to 1 px/s, so blending it
+  // every 30 Hz tugs the disc and reads as stutter.
+  if (err >= CORRECT_SNAP) {
+    predicted.x = remote.x;
+    predicted.y = remote.y;
+    predicted.vx = Number(remote.vx) || 0;
+    predicted.vy = Number(remote.vy) || 0;
+  } else if (err > 0.5) {
+    predicted.x += dx * CORRECT_BLEND;
+    predicted.y += dy * CORRECT_BLEND;
+  }
+  if (remote.invuln != null) predicted.invuln = Number(remote.invuln) || 0;
+}
+
+// Replay masks the referee has not consumed yet, on top of the confirmed pose.
+// Shots stay with the referee. This only moves the local disc.
+function replayUnacked(body) {
+  if (!body || !map) return;
+  for (const entry of sentInputs) {
+    if (entry.seq <= predictedAck) continue;
+    applyInput(body, entry.mask, DT);
+    integratePlayer(body, map, DT);
+  }
+}
+
+function stepPredicted(mask) {
+  if (!predicted || !predicted.alive || !map) return;
+  if (pickedTeam === TEAM_SPEC) return;
+  applyInput(predicted, mask, DT);
+  integratePlayer(predicted, map, DT);
+}
+
 function stepGuest() {
   if (pickedTeam === TEAM_SPEC) {
+    predicted = null;
     if (seenEventId > sentAck) {
       sentAck = seenEventId;
       net.sendInput(inputSeq, 0, seenEventId);
@@ -774,6 +875,7 @@ function stepGuest() {
   const mask = rememberInput(inputSeq, wasd.sample());
   sentAck = seenEventId;
   net.sendInput(inputSeq, mask, seenEventId);
+  stepPredicted(mask);
 }
 
 function tickMatch() {
@@ -799,6 +901,8 @@ function onWelcome(state) {
   hostEventAcks = new Map();
   renderDelay = INTERP_DELAY * 1000;
   delayQuietSince = 0;
+  predicted = null;
+  predictedAck = 0;
   latestSnap = null;
   latestSnapAt = 0;
   snapBuffer = [];
@@ -872,9 +976,37 @@ function onGame(msg, fromId) {
       }
     }
     paintFromSnapshot(snap);
+    if (needsPrediction()) adoptPrediction(snap);
     if (snap.phase === 'playing' || snap.phase === 'round_end') showLobby(false);
     else showLobby(true);
   }
+}
+
+function adoptPrediction(snap) {
+  if (pickedTeam === TEAM_SPEC) {
+    predicted = null;
+    return;
+  }
+  const remote = findSnapPlayer(snap, selfId);
+  if (!remote) return;
+  const ack = remote.ack | 0;
+  dropAckedInputs(ack);
+  if (!predicted) {
+    predicted = seedPredicted(remote);
+    replayUnacked(predicted);
+    return;
+  }
+  // Confirmed pose, then the inputs the referee has not consumed yet.
+  // A live step on top of that would double-apply the newest mask.
+  const replayed = seedPredicted(remote);
+  replayUnacked(replayed);
+  if (!replayed) return;
+  // Keep the live facing. Replaying the turn rate from a stale ack yanks it.
+  replayed.fx = predicted.fx;
+  replayed.fy = predicted.fy;
+  replayed.vx = predicted.vx;
+  replayed.vy = predicted.vy;
+  correctPredicted(replayed);
 }
 
 function leaveRoomToSandbox(message) {
@@ -1059,41 +1191,70 @@ joinBtn.addEventListener('click', () => {
 });
 
 let last = 0;
-let acc = 0;
+let simClock = 0;
+let simTimer = 0;
+let simSteps = 0;
+
+const SIM_LATE_MS = 100;
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  acc = 0;
+  // A hidden tab must not replay the gap. The next tick starts from now.
+  simClock = 0;
   last = 0;
 });
+
+function simActive() {
+  return !!(match || mode === 'guest' || serverHost);
+}
+
+// Fixed 60 Hz, not "however fast the screen paints". A late callback runs a
+// few ticks. Past 100 ms the slice is dropped instead of dumped into one frame.
+function tickClock() {
+  if (document.hidden || !simActive()) {
+    simClock = 0;
+    scheduleSim(DT * 1000);
+    return;
+  }
+  const now = performance.now();
+  if (!simClock) simClock = now;
+  let gap = now - simClock;
+  let steps = 0;
+  let late = false;
+  if (gap >= SIM_LATE_MS) {
+    simClock = now;
+    steps = 1;
+    late = true;
+  } else {
+    while (gap >= DT * 1000 && steps < MAX_STEPS) {
+      gap -= DT * 1000;
+      steps += 1;
+    }
+    simClock = now - gap;
+  }
+  for (let i = 0; i < steps; i += 1) tickMatch();
+  if (steps > 1) flushHostSnapshot(true);
+  else if (steps === 1) flushHostSnapshot(false);
+  simSteps += steps;
+  const remain = late ? DT * 1000 : DT * 1000 - (performance.now() - simClock);
+  scheduleSim(remain);
+}
+
+function scheduleSim(ms) {
+  if (simTimer) clearTimeout(simTimer);
+  simTimer = setTimeout(tickClock, ms > 1 ? ms : 1);
+}
 
 function frame(now) {
   if (!last) last = now;
   let frameDt = (now - last) / 1000;
   last = now;
-  // A hidden tab used to clamp the gap to 250 ms and replay it. Reset instead.
-  if (document.hidden || frameDt > 0.25) {
-    acc = 0;
-    frameDt = 0;
-  }
-  // Guests have no local match. Their only sim is the host snapshot, but
-  // controls still have to be sampled and sent every tick.
-  let steps = 0;
-  if (match || mode === 'guest' || serverHost) {
-    acc += frameDt;
-    const cap = DT * MAX_STEPS;
-    if (acc > cap) acc = cap;
-    while (acc >= DT) {
-      tickMatch();
-      acc -= DT;
-      steps += 1;
-    }
-    if (steps > 1) flushHostSnapshot(true);
-    else if (steps === 1) flushHostSnapshot(false);
-  }
+  if (document.hidden || frameDt > 0.25) frameDt = 0;
   agePaint(frameDt);
   const drawStart = performance.now();
   renderer.draw(buildView(), frameDt);
+  const steps = simSteps;
+  simSteps = 0;
   metrics.note({
     frameMs: frameDt * 1000,
     drawMs: performance.now() - drawStart,
@@ -1105,6 +1266,8 @@ function frame(now) {
   metrics.maybeReport(now);
   requestAnimationFrame(frame);
 }
+
+scheduleSim(DT * 1000);
 
 lobbyEl.addEventListener('submit', (event) => event.preventDefault());
 

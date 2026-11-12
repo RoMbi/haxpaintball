@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,6 +35,8 @@ const sessions = new Map();
 const mapsById = new Map();
 const TICK_MS = DT * 1000;
 const MAX_CATCHUP = 5;
+// Past this the loop is late, not behind. One state, then reset the clock.
+const LATE_RESET_MS = 100;
 
 function randomString(length) {
   let out = '';
@@ -208,28 +211,39 @@ function sendSnapshot(room) {
   broadcast(room, { t: ServerMsg.SNAPSHOT, snap: snapshot(room.match) });
 }
 
-function stepRoom(room, now) {
-  if (!room.serverHost || !room.match) return;
-  if (!room.lastTick) {
-    room.lastTick = now;
-    return;
-  }
-  room.acc += now - room.lastTick;
-  room.lastTick = now;
-  const cap = TICK_MS * MAX_CATCHUP;
-  if (room.acc > cap) room.acc = cap;
-  let stepped = false;
-  while (room.acc >= TICK_MS) {
-    step(room.match);
-    room.acc -= TICK_MS;
-    stepped = true;
-  }
-  if (stepped) sendSnapshot(room);
+function stepRoom(room, steps) {
+  if (!room.serverHost || !room.match || steps < 1) return;
+  for (let i = 0; i < steps; i += 1) step(room.match);
+  // One snapshot for the window, not one per caught-up tick.
+  sendSnapshot(room);
 }
 
 function tickRooms() {
-  const now = Date.now();
-  for (const room of rooms.values()) stepRoom(room, now);
+  const now = performance.now();
+  if (!tickClock) tickClock = now;
+  let gap = now - tickClock;
+  let steps = 0;
+  if (gap >= LATE_RESET_MS) {
+    // Late, not behind. One state, then the next tick is a full interval out.
+    tickClock = now;
+    steps = 1;
+  } else {
+    while (gap >= TICK_MS && steps < MAX_CATCHUP) {
+      gap -= TICK_MS;
+      steps += 1;
+    }
+    tickClock = now - gap;
+  }
+  if (steps > 0) {
+    for (const room of rooms.values()) stepRoom(room, steps);
+  }
+  const remain = gap >= LATE_RESET_MS ? TICK_MS : TICK_MS - (performance.now() - tickClock);
+  scheduleTick(remain);
+}
+
+function scheduleTick(ms) {
+  const delay = ms > 1 ? ms : 1;
+  setTimeout(tickRooms, delay);
 }
 
 function handleCreate(ws, msg) {
@@ -581,7 +595,8 @@ wss.on('connection', (ws) => {
 loadMaps();
 
 const port = process.env.PORT || 8080;
-setInterval(tickRooms, TICK_MS);
+let tickClock = 0;
+scheduleTick(TICK_MS);
 server.listen(port, '0.0.0.0', () => {
   const addr = server.address();
   console.log(`listening on ${addr.address}:${addr.port}`);
