@@ -16,6 +16,7 @@ import {
   BULLET_LIFE,
   BULLET_COOLDOWN,
   BULLET_TAP_RATE,
+  BULLET_SPIN,
   MARKER_ALONG,
   MARKER_RIGHT,
   MARKER_TIP,
@@ -553,6 +554,15 @@ function lerpAngle(a, b, t) {
   return from + delta * t;
 }
 
+// Straight for the first half, then the same tumble the sim applies.
+// Driven from render time so a quantized snapshot angle cannot swim.
+function tumbleAngle(life, spinSign) {
+  const left = Number.isFinite(life) ? life : BULLET_LIFE;
+  const spun = Math.max(0, BULLET_LIFE * 0.5 - left);
+  const sign = spinSign < 0 ? -1 : 1;
+  return sign * BULLET_SPIN * spun;
+}
+
 function facingOf(fx, fy) {
   if (!Number.isFinite(fx) || !Number.isFinite(fy)) return 0;
   return Math.atan2(fy, fx);
@@ -655,7 +665,9 @@ function blendPlayer(before, after, t) {
 
 function blendBullet(before, after, t) {
   const blended = blendPair(before, after, t, ['x', 'y']);
-  blended.angle = lerpAngle(before.angle, after.angle, t);
+  const life = lerp(before.life, after.life, t);
+  const sign = after.spin != null ? after.spin : before.spin;
+  blended.angle = tumbleAngle(life, sign);
   return blended;
 }
 
@@ -962,6 +974,7 @@ function muzzleShot(body) {
     vy: fy * BULLET_SPEED + body.vy * BULLET_INHERIT,
     life: BULLET_LIFE,
     angle: 0,
+    spin: 1,
   };
 }
 
@@ -973,7 +986,7 @@ function stepLocalBullets() {
     if (bullet.life <= 0) continue;
     bullet.x += bullet.vx * DT;
     bullet.y += bullet.vy * DT;
-    kept.push(bullet);
+       bullet.angle = tumbleAngle(bullet.life, bullet.spin);  kept.push(bullet);
   }
   localBullets = kept;
 }

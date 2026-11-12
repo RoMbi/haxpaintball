@@ -376,8 +376,10 @@ export function snapshot(match, opts) {
       y: roundTenth(bullet.y),
       vx: roundUnit(bullet.vx),
       vy: roundUnit(bullet.vy),
-      angle: roundTenth(bullet.angle || 0),
-      spin: roundTenth(bullet.spin || 0),
+      life: roundHundredth(bullet.life),
+      // Visual tumble only. The client spins from the sign so a 0.1 rad
+      // quantize cannot make the core jump inside the ball.
+      spin: bullet.spin < 0 ? -1 : 1,
     })),
     events,
   };
