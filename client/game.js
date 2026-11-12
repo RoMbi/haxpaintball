@@ -864,19 +864,30 @@ function correctPredicted(remote) {
 // Replay masks the referee has not consumed yet, on top of the confirmed pose.
 // Shots stay with the referee. This only moves the local disc.
 function replayUnacked(body) {
-  if (!body || !map) return;
+  const field = predictMap();
+  if (!body || !field) return;
   for (const entry of sentInputs) {
     if (entry.seq <= predictedAck) continue;
     applyInput(body, entry.mask, DT);
-    integratePlayer(body, map, DT);
+    integratePlayer(body, field, DT);
   }
 }
 
+function predictMap() {
+  if (map) return map;
+  return mapsById.get(mapId) || null;
+}
+
 function stepPredicted(mask) {
-  if (!predicted || !predicted.alive || !map) return;
+  const field = predictMap();
+  if (!predicted || !predicted.alive || !field) return;
   if (pickedTeam === TEAM_SPEC) return;
   applyInput(predicted, mask, DT);
-  integratePlayer(predicted, map, DT);
+  if (map) integratePlayer(predicted, field, DT);
+  else {
+    predicted.x += predicted.vx * DT;
+    predicted.y += predicted.vy * DT;
+  }
   fireLocal(mask);
 }
 
@@ -1067,12 +1078,11 @@ function onGame(msg, fromId) {
     noteSnapGap(snapAt);
     latestSnap = snap;
     latestSnapAt = snapAt;
-    if (snap.mapId && mapsById.has(snap.mapId) && (snap.phase === 'playing' || snap.phase === 'round_end')) {
+    if (snap.mapId && mapsById.has(snap.mapId)) {
       const next = mapsById.get(snap.mapId);
-      if (map !== next) {
-        map = next;
-        mapId = next.id;
-      }
+      if (mapId !== next.id) mapId = next.id;
+      // Waiting still needs the field, or a joiner's local step has nothing to walk on.
+      if (map !== next) map = next;
     }
     paintFromSnapshot(snap);
     if (needsPrediction()) adoptPrediction(snap);
@@ -1090,24 +1100,35 @@ function adoptPrediction(snap) {
   if (snap.phase !== 'playing') clearLocalShots();
   const remote = findSnapPlayer(snap, selfId);
   if (!remote) return;
-  const ack = remote.ack | 0;
+  const ack = Number.isFinite(Number(remote.ack)) ? remote.ack | 0 : predictedAck;
   dropAckedInputs(ack);
   if (!predicted) {
     predicted = seedPredicted(remote);
-    replayUnacked(predicted);
     return;
   }
-  // Confirmed pose, then the inputs the referee has not consumed yet.
-  // A live step on top of that would double-apply the newest mask.
-  const replayed = seedPredicted(remote);
-  replayUnacked(replayed);
-  if (!replayed) return;
-  // Keep the live facing. Replaying the turn rate from a stale ack yanks it.
-  replayed.fx = predicted.fx;
-  replayed.fy = predicted.fy;
-  replayed.vx = predicted.vx;
-  replayed.vy = predicted.vy;
-  correctPredicted(replayed);
+  if (remote.alive === false) {
+    predicted.alive = false;
+    predicted.vx = 0;
+    predicted.vy = 0;
+    return;
+  }
+  if (!predicted.alive) {
+    predicted = seedPredicted(remote);
+    return;
+  }
+  // The live body already applied these masks. A snapshot is where we were,
+  // so pulling toward it is the lag. Only a real desync (spawn, shove through
+  // a wall) is allowed to move the disc.
+  const dx = remote.x - predicted.x;
+  const dy = remote.y - predicted.y;
+  const err = Math.hypot(dx, dy);
+  metrics.noteReconcile(err);
+  if (err >= CORRECT_SNAP) {
+    predicted.x = remote.x;
+    predicted.y = remote.y;
+    predicted.vx = Number(remote.vx) || 0;
+    predicted.vy = Number(remote.vy) || 0;
+  }
 }
 
 function leaveRoomToSandbox(message) {
@@ -1293,10 +1314,9 @@ joinBtn.addEventListener('click', () => {
 
 let last = 0;
 let simClock = 0;
-let simTimer = 0;
 let simSteps = 0;
 
-const SIM_LATE_MS = 100;
+const SIM_LATE_MS = 250;
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
@@ -1309,41 +1329,34 @@ function simActive() {
   return !!(match || mode === 'guest' || serverHost);
 }
 
-// Fixed 60 Hz, not "however fast the screen paints". A late callback runs a
-// few ticks. Past 100 ms the slice is dropped instead of dumped into one frame.
-function tickClock() {
-  if (document.hidden || !simActive()) {
+// Fixed 60 Hz on the display clock. setTimeout in a background tab drifts,
+// and that drift is what made a keypress land a second late.
+function tickClock(now) {
+  if (!simActive()) {
     simClock = 0;
-    scheduleSim(DT * 1000);
     return;
   }
-  const now = performance.now();
+  if (document.hidden) {
+    simClock = 0;
+    return;
+  }
   if (!simClock) simClock = now;
   let gap = now - simClock;
   let steps = 0;
-  let late = false;
   if (gap >= SIM_LATE_MS) {
     simClock = now;
     steps = 1;
-    late = true;
   } else {
     while (gap >= DT * 1000 && steps < MAX_STEPS) {
       gap -= DT * 1000;
       steps += 1;
     }
-    simClock = now - gap;
+    if (steps > 0) simClock += steps * DT * 1000;
   }
   for (let i = 0; i < steps; i += 1) tickMatch();
   if (steps > 1) flushHostSnapshot(true);
   else if (steps === 1) flushHostSnapshot(false);
   simSteps += steps;
-  const remain = late ? DT * 1000 : DT * 1000 - (performance.now() - simClock);
-  scheduleSim(remain);
-}
-
-function scheduleSim(ms) {
-  if (simTimer) clearTimeout(simTimer);
-  simTimer = setTimeout(tickClock, ms > 1 ? ms : 1);
 }
 
 function frame(now) {
@@ -1351,6 +1364,7 @@ function frame(now) {
   let frameDt = (now - last) / 1000;
   last = now;
   if (document.hidden || frameDt > 0.25) frameDt = 0;
+  tickClock(now);
   agePaint(frameDt);
   const drawStart = performance.now();
   renderer.draw(buildView(), frameDt);
@@ -1367,8 +1381,6 @@ function frame(now) {
   metrics.maybeReport(now);
   requestAnimationFrame(frame);
 }
-
-scheduleSim(DT * 1000);
 
 lobbyEl.addEventListener('submit', (event) => event.preventDefault());
 
