@@ -5,6 +5,7 @@ import {
   ROUND_TIME,
   WINS_NEEDED,
   SNAPSHOT_EVERY,
+  KEY,
   TEAM_RED,
   TEAM_BLUE,
   TEAM_SPEC,
