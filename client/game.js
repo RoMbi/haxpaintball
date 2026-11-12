@@ -852,7 +852,14 @@ function reconcileDetail(where, remote, ahead) {
   const phase = latestSnap && latestSnap.phase ? latestSnap.phase : '';
   const localAlive = predicted && predicted.alive ? 'L' : 'l';
   const remoteAlive = remote && remote.alive !== false ? 'R' : 'r';
-  return { where, phase, alive: localAlive + remoteAlive, ahead: ahead | 0 };
+  return {
+    where,
+    phase,
+    alive: localAlive + remoteAlive,
+    ahead: ahead | 0,
+    tick: latestSnap ? latestSnap.tick | 0 : 0,
+    invuln: remote ? Number(remote.invuln) || 0 : 0,
+  };
 }
 
 function correctPredicted(remote) {
@@ -1159,9 +1166,12 @@ function adoptPrediction(snap) {
   // spot, and replaying unacked masks from there is the delayed lunge.
   const respawned = (Number(remote.invuln) || 0) > 0 && (Number(predicted && predicted.invuln) || 0) <= 0;
   if (!predicted || !predicted.alive || remote.alive === false || snap.phase !== 'playing' || snap.tick <= 2 || respawned) {
+    const dx = predicted ? remote.x - predicted.x : 0;
+    const dy = predicted ? remote.y - predicted.y : 0;
+    const jump = predicted ? Math.hypot(dx, dy) : 0;
     predicted = seedPredicted(remote);
     predictedSeq = predictedAck;
-    metrics.noteReconcile(0, reconcileDetail('reset', remote, 0));
+    metrics.noteReconcile(jump, reconcileDetail('reset', remote, 0));
     return;
   }
   if (spawnedAway(predicted, remote)) {

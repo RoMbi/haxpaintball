@@ -39,6 +39,8 @@ export function createClientMetrics() {
   let reconcilePhase = '';
   let reconcileAlive = '';
   let reconcileWhere = '';
+  let reconcileTick = 0;
+  let reconcileInvuln = 0;
   let snapAgeMs = 0;
   let snapBuffer = 0;
   let hasSnap = false;
@@ -108,6 +110,8 @@ export function createClientMetrics() {
       reconcileWhere || '-',
       reconcilePhase || '-',
       reconcileAlive || '-',
+      't' + reconcileTick,
+      'inv' + reconcileInvuln.toFixed(1),
     ].join(' ');
   }
 
@@ -158,6 +162,8 @@ export function createClientMetrics() {
         reconcilePhase = info.phase || '';
         reconcileAlive = info.alive || '';
         reconcileWhere = info.where || '';
+        reconcileTick = info.tick | 0;
+        reconcileInvuln = Number(info.invuln) || 0;
       }
       if (px > HARD_SNAP_PX) hardSnaps += 1;
     },
@@ -178,6 +184,8 @@ export function createClientMetrics() {
       reconcilePhase = '';
       reconcileAlive = '';
       reconcileWhere = '';
+      reconcileTick = 0;
+      reconcileInvuln = 0;
     },
   };
 }
