@@ -33,6 +33,7 @@ import {
   integratePlayer,
   step,
 } from './host.js';
+import { resolveDiscDisc } from '../shared/collide.js';
 import { MAP_WASD, MAP_IJKL, createInput } from './input.js';
 import { createRenderer, getZoom, setZoom, loadZoom } from './render.js';
 import { t, loadLang, setLang, mapName, matchMessage, serverError } from './i18n.js';
@@ -54,7 +55,8 @@ const INTERP_DELAY_MAX = 0.15;
 const INTERP_QUIET_MS = 2000;
 const SNAP_BUFFER = 32;
 const INPUT_HISTORY = 32;
-// Own disc is predicted. Error under this blends in. Past it, the disc is wrong enough to snap.
+// Own disc is predicted. A snapshot is the past; unacked masks are replayed on top.
+// Leftover error is drawn, then eased out. Past the snap it is a real desync.
 const CORRECT_BLEND = 0.3;
 const CORRECT_SNAP = 80;
 // Own shot is drawn from the muzzle on the tick the key went down.
@@ -123,6 +125,8 @@ let delayQuietSince = 0;
 // Local body for anyone who is not the referee. Rendered live, corrected from snapshots.
 let predicted = null;
 let predictedAck = 0;
+// Drawn offset only. Physics always sits on the replayed pose.
+let visualError = null;
 let localBullets = [];
 let triggerWasDown = false;
 let shotCooldown = 0;
@@ -391,6 +395,7 @@ function resetLocalMatch() {
   seenDeathId = 0;
   predicted = null;
   predictedAck = 0;
+  visualError = null;
   clearLocalShots();
   showLobby(true);
 }
@@ -819,10 +824,25 @@ function seedPredicted(raw) {
   return body;
 }
 
+function decayVisualError(now) {
+  if (!visualError) return;
+  const at = now || performance.now();
+  if (visualError.at === at) return;
+  visualError.at = at;
+  visualError.x *= 1 - CORRECT_BLEND;
+  visualError.y *= 1 - CORRECT_BLEND;
+  if (visualError.x * visualError.x + visualError.y * visualError.y < 0.25) visualError = null;
+}
+
 function drawPredicted() {
   const known = rosterOf(selfId);
+  decayVisualError(performance.now());
+  const ox = visualError ? visualError.x : 0;
+  const oy = visualError ? visualError.y : 0;
   return {
     ...predicted,
+    x: predicted.x + ox,
+    y: predicted.y + oy,
     id: selfId,
     nick: known ? known.nick : (predicted.nick || ''),
     team: known && known.team ? known.team : (predicted.team || pickedTeam),
@@ -830,6 +850,9 @@ function drawPredicted() {
   };
 }
 
+// Snapshot pose is where we were when the referee consumed ack. Replaying the
+// masks after that is where we should be now. Comparing the live body to the
+// snapshot measures lag, not error, and a snap there never converges.
 function correctPredicted(remote) {
   if (!predicted || !remote) return;
   if (remote.alive === false) {
@@ -838,39 +861,75 @@ function correctPredicted(remote) {
     predicted.y = remote.y;
     predicted.vx = 0;
     predicted.vy = 0;
+    visualError = null;
+    metrics.noteReconcile(0);
     return;
   }
   if (!predicted.alive) {
     predicted = seedPredicted(remote);
     return;
   }
-  const dx = remote.x - predicted.x;
-  const dy = remote.y - predicted.y;
+  const field = predictMap();
+  const body = seedPredicted(remote);
+  if (!body || !field) return;
+  replayUnacked(body, field);
+  const dx = body.x - predicted.x;
+  const dy = body.y - predicted.y;
   const err = Math.hypot(dx, dy);
   metrics.noteReconcile(err);
-  // Velocity stays local. Snapshot vx is rounded to 1 px/s, so blending it
-  // every 30 Hz tugs the disc and reads as stutter.
+  // Authority is the replay, not the live body. Leaving a large error in place
+  // makes the next snapshot miss by the same amount, so the jump never decays.
+  predicted.x = body.x;
+  predicted.y = body.y;
+  predicted.vx = body.vx;
+  predicted.vy = body.vy;
+  predicted.fx = body.fx;
+  predicted.fy = body.fy;
   if (err >= CORRECT_SNAP) {
-    predicted.x = remote.x;
-    predicted.y = remote.y;
-    predicted.vx = Number(remote.vx) || 0;
-    predicted.vy = Number(remote.vy) || 0;
+    visualError = null;
   } else if (err > 0.5) {
-    predicted.x += dx * CORRECT_BLEND;
-    predicted.y += dy * CORRECT_BLEND;
+    visualError = { x: -dx, y: -dy, at: 0 };
+  } else {
+    visualError = null;
   }
   if (remote.invuln != null) predicted.invuln = Number(remote.invuln) || 0;
 }
 
 // Replay masks the referee has not consumed yet, on top of the confirmed pose.
 // Shots stay with the referee. This only moves the local disc.
-function replayUnacked(body) {
-  const field = predictMap();
-  if (!body || !field) return;
+function replayUnacked(body, field) {
+  const mapField = field || predictMap();
+  if (!body || !mapField) return;
+  const others = snapOthers(latestSnap);
   for (const entry of sentInputs) {
     if (entry.seq <= predictedAck) continue;
     applyInput(body, entry.mask, DT);
-    integratePlayer(body, field, DT);
+    integratePlayer(body, mapField, DT);
+    separateFromOthers(body, others);
+  }
+}
+
+function snapOthers(snap) {
+  if (!snap || !snap.players) return [];
+  const others = [];
+  for (const raw of snap.players) {
+    if (!raw || raw.id === selfId || raw.alive === false) continue;
+    others.push({
+      x: Number(raw.x) || 0,
+      y: Number(raw.y) || 0,
+      vx: 0,
+      vy: 0,
+      r: PLAYER_RADIUS,
+    });
+  }
+  return others;
+}
+
+function separateFromOthers(body, others) {
+  if (!others.length) return;
+  body.r = PLAYER_RADIUS;
+  for (let iter = 0; iter < 4; iter += 1) {
+    for (const other of others) resolveDiscDisc(body, other);
   }
 }
 
@@ -972,6 +1031,7 @@ function drawOwnShots(remote) {
 function stepGuest() {
   if (pickedTeam === TEAM_SPEC) {
     predicted = null;
+    visualError = null;
     clearLocalShots();
     if (seenEventId > sentAck) {
       sentAck = seenEventId;
@@ -1011,6 +1071,7 @@ function onWelcome(state) {
   delayQuietSince = 0;
   predicted = null;
   predictedAck = 0;
+  visualError = null;
   localBullets = [];
   triggerWasDown = false;
   shotCooldown = 0;
@@ -1095,6 +1156,7 @@ function onGame(msg, fromId) {
 function adoptPrediction(snap) {
   if (pickedTeam === TEAM_SPEC) {
     predicted = null;
+    visualError = null;
     clearLocalShots();
     return;
   }
@@ -1109,27 +1171,20 @@ function adoptPrediction(snap) {
   }
   if (remote.alive === false) {
     predicted.alive = false;
+    predicted.x = remote.x;
+    predicted.y = remote.y;
     predicted.vx = 0;
     predicted.vy = 0;
+    visualError = null;
+    metrics.noteReconcile(0);
     return;
   }
   if (!predicted.alive) {
     predicted = seedPredicted(remote);
+    visualError = null;
     return;
   }
-  // The live body already applied these masks. A snapshot is where we were,
-  // so pulling toward it is the lag. Only a real desync (spawn, shove through
-  // a wall) is allowed to move the disc.
-  const dx = remote.x - predicted.x;
-  const dy = remote.y - predicted.y;
-  const err = Math.hypot(dx, dy);
-  metrics.noteReconcile(err);
-  if (err >= CORRECT_SNAP) {
-    predicted.x = remote.x;
-    predicted.y = remote.y;
-    predicted.vx = Number(remote.vx) || 0;
-    predicted.vy = Number(remote.vy) || 0;
-  }
+  correctPredicted(remote);
 }
 
 function leaveRoomToSandbox(message) {
