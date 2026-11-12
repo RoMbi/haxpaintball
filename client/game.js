@@ -33,7 +33,6 @@ import {
   integratePlayer,
   step,
 } from './host.js';
-import { resolveDiscDisc } from '../shared/collide.js';
 import { MAP_WASD, MAP_IJKL, createInput } from './input.js';
 import { createRenderer, getZoom, setZoom, loadZoom } from './render.js';
 import { t, loadLang, setLang, mapName, matchMessage, serverError } from './i18n.js';
@@ -872,7 +871,10 @@ function correctPredicted(remote) {
   const field = predictMap();
   const body = seedPredicted(remote);
   if (!body || !field) return;
-  replayUnacked(body, field);
+  // Server steps one mask per tick. A hole in ack is time the referee did not
+  // simulate, not masks we should run again on top of an already-moved pose.
+  const pending = Math.max(0, inputSeq - (predictedAck | 0));
+  replayUnacked(body, field, pending);
   const dx = body.x - predicted.x;
   const dy = body.y - predicted.y;
   const err = Math.hypot(dx, dy);
@@ -897,39 +899,17 @@ function correctPredicted(remote) {
 
 // Replay masks the referee has not consumed yet, on top of the confirmed pose.
 // Shots stay with the referee. This only moves the local disc.
-function replayUnacked(body, field) {
+function replayUnacked(body, field, pending) {
   const mapField = field || predictMap();
   if (!body || !mapField) return;
-  const others = snapOthers(latestSnap);
-  for (const entry of sentInputs) {
-    if (entry.seq <= predictedAck) continue;
-    applyInput(body, entry.mask, DT);
+  const steps = pending | 0;
+  if (steps < 1) return;
+  // Newest masks are the ones the referee has not consumed. A late packet
+  // already left the buffer, so replaying the whole history double-counts.
+  const start = Math.max(0, sentInputs.length - steps);
+  for (let i = start; i < sentInputs.length; i += 1) {
+    applyInput(body, sentInputs[i].mask, DT);
     integratePlayer(body, mapField, DT);
-    separateFromOthers(body, others);
-  }
-}
-
-function snapOthers(snap) {
-  if (!snap || !snap.players) return [];
-  const others = [];
-  for (const raw of snap.players) {
-    if (!raw || raw.id === selfId || raw.alive === false) continue;
-    others.push({
-      x: Number(raw.x) || 0,
-      y: Number(raw.y) || 0,
-      vx: 0,
-      vy: 0,
-      r: PLAYER_RADIUS,
-    });
-  }
-  return others;
-}
-
-function separateFromOthers(body, others) {
-  if (!others.length) return;
-  body.r = PLAYER_RADIUS;
-  for (let iter = 0; iter < 4; iter += 1) {
-    for (const other of others) resolveDiscDisc(body, other);
   }
 }
 
