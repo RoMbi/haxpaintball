@@ -1141,16 +1141,23 @@ function adoptPrediction(snap) {
     clearLocalShots();
     return;
   }
-  if (snap.phase !== 'playing') clearLocalShots();
+  // round_end is the pause before the spawn teleport. Predicting through it
+  // leaves the disc on the corpse, then the next playing snapshot is a hard snap.
+  if (snap.phase !== 'playing') {
+    clearLocalShots();
+    sentInputs.length = 0;
+  }
   const remote = findSnapPlayer(snap, selfId);
   if (!remote) return;
   const ack = Number.isFinite(Number(remote.ack)) ? remote.ack | 0 : predictedAck;
   dropAckedInputs(ack);
   // A new round puts the disc on a spawn. The live body is still at the old
   // spot, and replaying unacked masks from there is the delayed lunge.
-  if (!predicted || !predicted.alive || remote.alive === false || snap.tick <= 2) {
+  const respawned = (Number(remote.invuln) || 0) > 0 && (Number(predicted && predicted.invuln) || 0) <= 0;
+  if (!predicted || !predicted.alive || remote.alive === false || snap.phase !== 'playing' || snap.tick <= 2 || respawned) {
     predicted = seedPredicted(remote);
     predictedSeq = predictedAck;
+    metrics.noteReconcile(0);
     return;
   }
   if (spawnedAway(predicted, remote)) {
