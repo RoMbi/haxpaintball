@@ -8,6 +8,7 @@ export const ClientMsg = {
   SHUFFLE: 'shuffle',
   MAP: 'map',
   START: 'start',
+  PAUSE: 'pause',
   RULES: 'rules',
   INPUT: 'input',
 };

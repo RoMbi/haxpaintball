@@ -14,7 +14,7 @@ import {
   step,
   snapshot,
 } from '../shared/sim.js';
-import { syncRoster, releaseDeparted, tryStart, applyRules } from '../shared/authority.js';
+import { syncRoster, releaseDeparted, tryStart, applyRules, phaseOpen } from '../shared/authority.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -193,7 +193,7 @@ function syncMatchRoster(room) {
 
 function sendSnapshot(room) {
   if (!room.match) return;
-  const waiting = room.match.phase === 'waiting' || room.match.phase === 'match_end';
+  const waiting = room.match.phase === 'waiting' || room.match.phase === 'match_end' || room.match.phase === 'paused';
   if (!waiting && room.match.tick % SNAPSHOT_EVERY !== 0) return;
   broadcast(room, { t: ServerMsg.SNAPSHOT, snap: snapshot(room.match) });
 }
@@ -319,7 +319,7 @@ function handleMap(ws, msg) {
   const mapId = cleanMapId(msg.mapId);
   if (!MAP_IDS.has(msg.mapId) || mapId === room.mapId) return;
   room.mapId = mapId;
-  if (room.serverHost && room.match && (room.match.phase === 'waiting' || room.match.phase === 'match_end')) {
+  if (room.serverHost && room.match && phaseOpen(room.match.phase)) {
     room.match = createMatch(mapOf(mapId), room.match.rules);
     syncMatchRoster(room);
   }
@@ -364,6 +364,15 @@ function handleStart(ws) {
     fail(ws, 'need_both_teams');
     return;
   }
+  sendSnapshot(room);
+}
+
+function handlePause(ws) {
+  const sess = sessions.get(ws);
+  if (!sess) return;
+  const room = rooms.get(sess.code);
+  if (!room || !room.serverHost || sess.playerId !== room.hostId || !room.match) return;
+  if (!pauseMatch(room.match)) return;
   sendSnapshot(room);
 }
 
@@ -552,6 +561,9 @@ wss.on('connection', (ws) => {
         break;
       case ClientMsg.START:
         handleStart(ws);
+        break;
+      case ClientMsg.PAUSE:
+        handlePause(ws);
         break;
       case ClientMsg.RULES:
         handleRules(ws, msg);

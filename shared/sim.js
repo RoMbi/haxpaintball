@@ -66,6 +66,7 @@ export function createMatch(map, rules) {
     pause: 0,
     overtime: false,
     score: { red: 0, blue: 0 },
+    stats: {},
     message: 'waiting',
     winner: null,
     players: [],
@@ -227,6 +228,7 @@ export function start(match) {
   if (match.phase === 'match_end' || match.winner) {
     match.score.red = 0;
     match.score.blue = 0;
+    match.stats = {};
   }
   match.winner = null;
   beginRound(match);
@@ -383,6 +385,7 @@ export function snapshot(match, opts) {
     timeLeft: roundTenth(match.timeLeft),
     overtime: match.overtime,
     score: scoreCopy(match),
+    stats: statsCopy(match),
     message: match.message,
     winner: match.winner,
     lastEvent,
@@ -394,6 +397,7 @@ export function snapshot(match, opts) {
       vy: roundTenth(player.vy),
       facing: roundHundredth(Math.atan2(player.fy, player.fx)),
       alive: player.alive,
+      team: player.team,
       invuln: roundTenth(player.invuln),
       // Seq the referee already consumed. The owner replays only masks after this.
       ack: player.appliedSeq | 0,
@@ -425,6 +429,7 @@ function beginRound(match) {
   match.timeLeft = matchRules(match).roundTime;
   match.overtime = false;
   match.pause = 0;
+  match.winner = null;
   match.message = '';
   match.bullets = [];
   for (const player of match.players) {
@@ -553,6 +558,7 @@ function awardRound(match, team) {
   match.phase = 'round_end';
   match.pause = ROUND_END_PAUSE;
   match.overtime = false;
+  match.winner = team;
   match.message = team === TEAM_RED ? 'redRound' : 'blueRound';
   const center = mapCenter(match.map);
   pushEvent(match, {
@@ -583,6 +589,31 @@ function countAlive(match, team) {
 
 function scoreCopy(match) {
   return { red: match.score.red, blue: match.score.blue };
+}
+
+function noteFrag(match, killerId, victimId) {
+  if (!match.stats) match.stats = {};
+  if (victimId) {
+    const victim = match.stats[victimId] || (match.stats[victimId] = { k: 0, d: 0 });
+    victim.d += 1;
+  }
+  if (killerId && killerId !== victimId) {
+    const killer = match.stats[killerId] || (match.stats[killerId] = { k: 0, d: 0 });
+    killer.k += 1;
+  }
+}
+
+function statsCopy(match) {
+  const out = {};
+  const stats = match.stats || {};
+  for (const id of Object.keys(stats)) {
+    const row = stats[id];
+    const k = row && row.k | 0;
+    const d = row && row.d | 0;
+    if (!k && !d) continue;
+    out[id] = { k, d };
+  }
+  return out;
 }
 
 function pushEvent(match, fields) {
@@ -731,6 +762,7 @@ function collideBullet(match, bullet, x0, y0) {
     enemy.player.alive = false;
     enemy.player.vx = 0;
     enemy.player.vy = 0;
+    noteFrag(match, bullet.owner, enemy.player.id);
     pushEvent(match, {
       type: 'death',
       x: enemy.player.x,

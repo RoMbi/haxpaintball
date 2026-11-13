@@ -3,6 +3,10 @@ const LANG_KEY = 'haxpaintball.lang';
 export const STR = {
   pl: {
     menu: 'Lobby',
+    scoreboard: 'Wyniki',
+    kills: 'K',
+    deaths: 'D',
+    kd: 'K/D',
     lang: 'Język',
     nick: 'Nick',
     map: 'Mapa',
@@ -41,6 +45,8 @@ export const STR = {
     roomHud: 'pokój {code}',
     reloading: 'przeładowanie {time}s',
     balls: 'kulki {count}/{max}',
+    roundWin: 'ROUND WIN',
+    wasted: 'WASTED',
     mapName: {
       'small-cross': 'Mała - krzyż',
       'small-alley': 'Mała - aleja',
@@ -73,6 +79,10 @@ export const STR = {
   },
   en: {
     menu: 'Lobby',
+    scoreboard: 'Score',
+    kills: 'K',
+    deaths: 'D',
+    kd: 'K/D',
     lang: 'Language',
     nick: 'Nick',
     map: 'Map',
@@ -111,6 +121,8 @@ export const STR = {
     roomHud: 'room {code}',
     reloading: 'reloading {time}s',
     balls: 'balls {count}/{max}',
+    roundWin: 'ROUND WIN',
+    wasted: 'WASTED',
     mapName: {
       'small-cross': 'Small - cross',
       'small-alley': 'Small - alley',

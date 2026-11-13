@@ -5,7 +5,7 @@ import { addPlayer, removePlayer, canStart, start } from './sim.js';
 // Callers own sockets, the lobby DOM, and when a snapshot is sent.
 
 export function phaseOpen(phase) {
-  return phase === 'waiting' || phase === 'match_end';
+  return phase === 'waiting' || phase === 'match_end' || phase === 'paused';
 }
 
 export function rosterOpen(match) {

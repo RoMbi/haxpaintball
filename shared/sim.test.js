@@ -475,6 +475,32 @@ test('pauza końca rundy zjada maski, nowa runda nie odtwarza ich od spawnu', ()
   assert.equal(red.appliedSeq, 1000 + pauseTicks - 1);
 });
 
+test('k i d trzymają się meczu, a nowy mecz je zeruje', () => {
+  const { match, red, blue } = makePlaying(boxMap(), { rules: { roundTime: 60, winsNeeded: 3 } });
+  place(red, 200, 300, { x: 1, y: 0 });
+  place(blue, 248, 300, { x: -1, y: 0 });
+  red.ammo = 50;
+  red.cooldown = 0;
+  setInput(match, red.id, KEY.SHOOT, 1);
+  steps(match, 20);
+  assert.equal(alive(match, blue.id), false);
+  assert.deepEqual(match.stats[red.id], { k: 1, d: 0 });
+  assert.deepEqual(match.stats[blue.id], { k: 0, d: 1 });
+  const snap = snapshot(match);
+  assert.deepEqual(snap.stats[red.id], { k: 1, d: 0 });
+  assert.deepEqual(snap.stats[blue.id], { k: 0, d: 1 });
+  snap.stats[red.id].k = 9;
+  assert.equal(match.stats[red.id].k, 1);
+  steps(match, Math.ceil(ROUND_END_PAUSE / DT) + 2);
+  assert.equal(match.phase, 'playing');
+  assert.equal(match.stats[red.id].k, 1);
+  assert.equal(match.stats[blue.id].d, 1);
+  match.phase = 'match_end';
+  match.winner = TEAM_RED;
+  assert.equal(start(match), true);
+  assert.deepEqual(match.stats, {});
+});
+
 let failed = 0;
 for (const item of tests) {
   try {

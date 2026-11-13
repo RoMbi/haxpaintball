@@ -25,6 +25,7 @@ import {
   addPlayer,
   setInput,
   canStart,
+  pauseMatch,
   start,
   step,
 } from './host.js';
@@ -37,6 +38,7 @@ import { createClientMetrics } from './metrics.js';
 
 const LOCAL_RED = 'local-red';
 const LOCAL_BLUE = 'local-blue';
+const VICTORY_HOLD = 4;
 const NICK_KEY = 'haxpaintball.nick';
 const MAP_KEY = 'haxpaintball.map';
 const RULES_KEY = 'haxpaintball.rules';
@@ -46,6 +48,9 @@ const MAX_STEPS = 5;
 // Render behind the newest snapshot so a frame always has two samples to blend.
 const INTERP_INTERVALS = 2;
 const INTERP_DELAY = SNAPSHOT_EVERY * DT * INTERP_INTERVALS;
+// Guest view sits this many ticks behind the newest snapshot. Hold the host's
+// own mask for the same count so a join does not leave the referee instant.
+const HOST_INPUT_DELAY = SNAPSHOT_EVERY * INTERP_INTERVALS;
 const INTERP_DELAY_MAX = 0.15;
 const INTERP_QUIET_MS = 2000;
 const SNAP_BUFFER = 32;
@@ -54,6 +59,12 @@ const INPUT_HISTORY = 32;
 const canvas = document.querySelector('#view');
 const lobbyEl = document.querySelector('#lobby');
 const menuBtn = document.querySelector('#menu');
+const scoreBtn = document.querySelector('#score-btn');
+const teamBoardEl = document.querySelector('#team-board');
+const teamBoardBody = document.querySelector('#team-board-body');
+const scoreboardEl = document.querySelector('#scoreboard');
+const scoreRedBody = document.querySelector('#score-red');
+const scoreBlueBody = document.querySelector('#score-blue');
 const langPick = document.querySelector('#lang-pick');
 const langEl = document.querySelector('#lang');
 const splashEl = document.querySelector('#splash');
@@ -81,7 +92,7 @@ const roundTimeEl = document.querySelector('#round-time');
 const winsNeededEl = document.querySelector('#wins-needed');
 const rulesRow = document.querySelector('#rules-row');
 
-const renderer = createRenderer(canvas);
+const renderer = canvas ? createRenderer(canvas) : { draw() {} };
 const wasd = createInput(window, MAP_WASD);
 const ijkl = createInput(window, MAP_IJKL);
 
@@ -99,6 +110,7 @@ let isHost = false;
 let serverHost = false;
 let connecting = false;
 let inputSeq = 0;
+let hostInputQueue = [];
 let sentInputs = [];
 let sentAck = 0;
 let latestSnap = null;
@@ -107,6 +119,7 @@ let snapBuffer = [];
 let paint = [];
 let seenEventId = 0;
 let seenDeathId = 0;
+const wasAlive = new Map();
 let hostEventAcks = new Map();
 let renderDelay = INTERP_DELAY * 1000;
 let delayQuietSince = 0;
@@ -132,13 +145,40 @@ function setStatus(text) {
   statusEl.textContent = text || '';
 }
 
+let victoryLeft = 0;
+
+function currentPhase() {
+  if (mode === 'guest' || serverHost) return latestSnap ? latestSnap.phase : '';
+  return match ? match.phase : '';
+}
+
+function noteMatchEnd() {
+  if (currentPhase() === 'match_end') beginVictoryHold();
+}
+
+function beginVictoryHold() {
+  if (victoryLeft > 0) return;
+  victoryLeft = VICTORY_HOLD;
+  showLobby(false);
+}
+
+function tickVictoryHold(dt) {
+  if (victoryLeft <= 0) return;
+  victoryLeft -= dt;
+  if (victoryLeft > 0) return;
+  victoryLeft = 0;
+  if (currentPhase() === 'match_end' || currentPhase() === 'waiting') showLobby(true);
+}
+
 function showLobby(show) {
   lobbyEl.classList.toggle('hidden', !show);
   lobbyEl.hidden = !show;
   splashEl.classList.toggle('hidden', !show);
   splashEl.hidden = !show;
   hotseatEl.classList.toggle('hidden', mode !== 'local' || show);
-  menuBtn.classList.toggle('hidden', show);
+  if (menuBtn) menuBtn.classList.toggle('hidden', show);
+  if (scoreBtn) scoreBtn.classList.toggle('hidden', show);
+  if (show) setScoreboard(false);
   langPick.classList.toggle('hidden', !show);
   // Menu keys must type, not steer. Clear any key already held when it opens.
   wasd.setBlocked(show);
@@ -195,8 +235,8 @@ function fillTeamList(list, team) {
 function sidesReady() {
   if (serverHost) {
     if (!latestSnap) return false;
-    if (latestSnap.phase !== 'waiting' && latestSnap.phase !== 'match_end') return false;
-  } else if (!match || (match.phase !== 'waiting' && match.phase !== 'match_end')) {
+    if (latestSnap.phase !== 'waiting' && latestSnap.phase !== 'match_end' && latestSnap.phase !== 'paused') return false;
+  } else if (!match || (match.phase !== 'waiting' && match.phase !== 'match_end' && match.phase !== 'paused')) {
     return false;
   }
   let red = 0;
@@ -329,7 +369,7 @@ function applyMap(id, restart) {
   if (!restart || mode === 'guest') return true;
   if (mode === 'host') {
     if (serverHost) return true;
-    if (!isHost || (match && match.phase !== 'waiting' && match.phase !== 'match_end')) return true;
+    if (!isHost || (match && match.phase !== 'waiting' && match.phase !== 'match_end' && match.phase !== 'paused')) return true;
     rebuildHostMatch();
     return true;
   }
@@ -350,6 +390,9 @@ function rebuildHostMatch() {
   paint = [];
   seenEventId = 0;
   seenDeathId = 0;
+  wasAlive.clear();
+  hostInputQueue = [];
+  clearScoreNames();
 }
 
 function teamOf(value) {
@@ -371,6 +414,7 @@ function resetLocalMatch() {
   isHost = false;
   serverHost = false;
   inputSeq = 0;
+  hostInputQueue = [];
   latestSnap = null;
   latestSnapAt = 0;
   snapBuffer = [];
@@ -379,6 +423,8 @@ function resetLocalMatch() {
   paint = [];
   seenEventId = 0;
   seenDeathId = 0;
+  wasAlive.clear();
+  clearScoreNames();
   shotSeq = 0;
   shotAck = 0;
   shotWasDown = false;
@@ -404,7 +450,7 @@ function rosterOpen() {
     ? (latestSnap && latestSnap.phase)
     : (match && match.phase);
   if (!phase) return true;
-  return phase === 'waiting' || phase === 'match_end';
+  return phase === 'waiting' || phase === 'match_end' || phase === 'paused';
 }
 
 function syncHostDiscs() {
@@ -448,6 +494,28 @@ function agePaint(frameDt) {
 
 function paintFromMatch() {
   ingestHits(match.recentEvents);
+}
+
+function noteVisibleDeaths(players) {
+  if (!players || !players.length) return;
+  const seen = new Set();
+  for (const player of players) {
+    if (!player || player.id == null) continue;
+    seen.add(player.id);
+    const alive = player.alive !== false;
+    if (wasAlive.get(player.id) === true && !alive) {
+      renderer.shatter({
+        x: player.x,
+        y: player.y,
+        victimId: player.id,
+        victimTeam: player.team,
+      });
+    }
+    wasAlive.set(player.id, alive);
+  }
+  for (const id of wasAlive.keys()) {
+    if (!seen.has(id)) wasAlive.delete(id);
+  }
 }
 
 function paintFromSnapshot(snap) {
@@ -528,6 +596,12 @@ function percentile(values, p) {
   const sorted = values.slice().sort((a, b) => a - b);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
   return sorted[index];
+}
+
+function resetInterpDelay() {
+  renderDelay = INTERP_DELAY * 1000;
+  delayQuietSince = 0;
+  snapBuffer = [];
 }
 
 function noteSnapGap(nowMs) {
@@ -659,6 +733,189 @@ function selfAmmo(source) {
   return ammoOf(players.find((player) => player.id === selfId));
 }
 
+function localBanners(source) {
+  if (!source || source.phase !== 'round_end' || !source.winner) return null;
+  const won = source.winner;
+  return [
+    { team: TEAM_RED, title: won === TEAM_RED ? t('roundWin') : t('wasted'), lost: won !== TEAM_RED },
+    { team: TEAM_BLUE, title: won === TEAM_BLUE ? t('roundWin') : t('wasted'), lost: won !== TEAM_BLUE },
+  ];
+}
+
+function selfTeam() {
+  const known = roster.find((player) => player.id === selfId);
+  if (known && known.team) return known.team;
+  if (remoteView() && latestSnap) {
+    const self = findSnapPlayer(latestSnap, selfId);
+    if (self && self.team) return self.team;
+  }
+  if (match) {
+    const self = match.players.find((player) => player.id === selfId);
+    if (self && self.team) return self.team;
+  }
+  return pickedTeam;
+}
+
+let scoreboardOpen = false;
+let scoreNames = new Map();
+let statsPhase = '';
+
+function clearScoreNames() {
+  scoreNames = new Map();
+}
+
+function rememberNames() {
+  for (const entry of roster) {
+    if (!entry || !entry.id) continue;
+    const prev = scoreNames.get(entry.id);
+    scoreNames.set(entry.id, {
+      nick: entry.nick || (prev && prev.nick) || '',
+      team: entry.team || (prev && prev.team) || '',
+    });
+  }
+  if (!match) return;
+  for (const player of match.players) {
+    if (!player || !player.id) continue;
+    const prev = scoreNames.get(player.id);
+    scoreNames.set(player.id, {
+      nick: player.nick || (prev && prev.nick) || '',
+      team: player.team || (prev && prev.team) || '',
+    });
+  }
+}
+
+function noteStatsPhase() {
+  const phase = currentPhase();
+  if (statsPhase === 'match_end' && phase === 'playing') clearScoreNames();
+  statsPhase = phase;
+}
+
+function setScoreboard(open) {
+  scoreboardOpen = !!open && !!scoreBtn && !scoreBtn.classList.contains('hidden');
+  scoreboardEl.classList.toggle('hidden', !scoreboardOpen);
+  scoreboardEl.hidden = !scoreboardOpen;
+  scoreBtn.classList.toggle('on', scoreboardOpen);
+  if (scoreboardOpen) renderScoreboard();
+}
+
+function statOf(id) {
+  const bag = remoteView() ? (latestSnap && latestSnap.stats) : (match && match.stats);
+  const row = bag && bag[id];
+  return {
+    k: row && row.k ? row.k | 0 : 0,
+    d: row && row.d ? row.d | 0 : 0,
+  };
+}
+
+function kdText(k, d) {
+  const value = d ? k / d : k;
+  return value.toFixed(2);
+}
+
+function aliveById() {
+  const found = new Map();
+  const players = remoteView()
+    ? ((latestSnap && latestSnap.players) || [])
+    : ((match && match.players) || []);
+  for (const player of players) {
+    if (!player || player.id == null) continue;
+    found.set(player.id, player.alive !== false);
+  }
+  return found;
+}
+
+function scoreRows() {
+  noteStatsPhase();
+  rememberNames();
+  const alive = aliveById();
+  const rows = [];
+  for (const [id, entry] of scoreNames) {
+    if (!entry || (entry.team !== TEAM_RED && entry.team !== TEAM_BLUE)) continue;
+    rows.push(scoreRow(id, entry.nick, entry.team, alive));
+  }
+  return rows;
+}
+
+function scoreRow(id, nick, team, alive) {
+  const stat = statOf(id);
+  return {
+    id,
+    nick: nick || t('player'),
+    team,
+    k: stat.k,
+    d: stat.d,
+    alive: alive.has(id) ? alive.get(id) : null,
+  };
+}
+
+function compareNick(a, b) {
+  return String(a.nick || '').localeCompare(String(b.nick || ''), undefined, { sensitivity: 'base' });
+}
+
+function cell(text) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  return td;
+}
+
+function paintRow(row, markAlive) {
+  const tr = document.createElement('tr');
+  tr.classList.add(row.team === TEAM_BLUE ? 'blue' : 'red');
+  if (row.id === selfId) tr.classList.add('self');
+  if (markAlive && row.alive === false) tr.classList.add('dead');
+  tr.append(cell(row.nick), cell(String(row.k)), cell(String(row.d)), cell(kdText(row.k, row.d)));
+  return tr;
+}
+
+function byKd(a, b) {
+  const ratioA = a.d ? a.k / a.d : a.k;
+  const ratioB = b.d ? b.k / b.d : b.k;
+  if (ratioB !== ratioA) return ratioB - ratioA;
+  if (b.k !== a.k) return b.k - a.k;
+  return compareNick(a, b);
+}
+
+function ownTeam() {
+  if (mode === 'local' && match) {
+    const self = match.players.find((player) => player.id === selfId);
+    if (self) return self.team;
+  }
+  const self = roster.find((player) => player.id === selfId);
+  if (self && self.team) return self.team;
+  return pickedTeam;
+}
+
+function renderTeamBoard() {
+  const team = ownTeam();
+  const show = currentPhase() === 'playing'
+    && lobbyEl.classList.contains('hidden')
+    && (team === TEAM_RED || team === TEAM_BLUE);
+  teamBoardEl.classList.toggle('hidden', !show);
+  teamBoardEl.hidden = !show;
+  teamBoardEl.style.bottom = hotseatEl.classList.contains('hidden') ? '16px' : '40px';
+  if (!show) {
+    teamBoardBody.replaceChildren();
+    return;
+  }
+  const rows = scoreRows()
+    .filter((row) => row.team === team)
+    .sort((a, b) => {
+      const aliveA = a.alive === false ? 1 : 0;
+      const aliveB = b.alive === false ? 1 : 0;
+      if (aliveA !== aliveB) return aliveA - aliveB;
+      return compareNick(a, b);
+    });
+  teamBoardBody.replaceChildren(...rows.map((row) => paintRow(row, true)));
+}
+
+function renderScoreboard() {
+  const rows = scoreRows();
+  const red = rows.filter((row) => row.team === TEAM_RED).sort(byKd);
+  const blue = rows.filter((row) => row.team === TEAM_BLUE).sort(byKd);
+  scoreRedBody.replaceChildren(...red.map((row) => paintRow(row, false)));
+  scoreBlueBody.replaceChildren(...blue.map((row) => paintRow(row, false)));
+}
+
 function hudFrom(source) {
   const score = source.score || { red: 0, blue: 0 };
   return {
@@ -667,6 +924,9 @@ function hudFrom(source) {
     phase: source.phase,
     message: matchMessage(source.message),
     overtime: !!source.overtime,
+    winner: source.winner || '',
+    selfTeam: selfTeam(),
+    split: mode === 'local' && source.phase === 'round_end',
     roomCode,
     transport: mode === 'local' ? '' : transport,
     roster: mode === 'local' ? [] : roster,
@@ -676,10 +936,10 @@ function hudFrom(source) {
 
 function fieldVisible() {
   if (mode === 'guest' || serverHost) {
-    return !!(latestSnap && (latestSnap.phase === 'playing' || latestSnap.phase === 'round_end'));
+    return !!(latestSnap && (latestSnap.phase === 'playing' || latestSnap.phase === 'round_end' || latestSnap.phase === 'match_end'));
   }
   if (mode === 'local') return false;
-  return !!(match && (match.phase === 'playing' || match.phase === 'round_end'));
+  return !!(match && (match.phase === 'playing' || match.phase === 'round_end' || match.phase === 'match_end'));
 }
 
 function remoteView() {
@@ -710,31 +970,59 @@ function buildView() {
     selfId,
     los: mode !== 'local',
     hud: match ? hudFrom(match) : hudFrom({}),
+    banners: mode === 'local' ? localBanners(match) : null,
   };
+}
+
+function queueHostInput(id, mask, seq, shot) {
+  // Sandbox has no guest to match. A delayed hotseat just feels broken.
+  if (mode !== 'host' || serverHost) {
+    setInput(match, id, mask, seq, shot);
+    return;
+  }
+  hostInputQueue.push({ id, mask, seq, shot });
+}
+
+function flushHostInput() {
+  if (mode !== 'host' || serverHost || !match) return;
+  while (hostInputQueue.length > HOST_INPUT_DELAY) {
+    const sample = hostInputQueue.shift();
+    setInput(match, sample.id, sample.mask, sample.seq, sample.shot);
+  }
 }
 
 function stepLocalOrHost() {
   syncLocalNick();
   ensureHotseat();
   releaseDeparted(match, roster);
+  // Lobby blocks keys, so the pause must not sit in the host delay queue.
+  // Replaying it on resume is the lag that grows each visit.
+  if (match.phase === 'paused') {
+    hostInputQueue = [];
+    shotWasDown = false;
+    step(match);
+    paintFromMatch();
+    return;
+  }
   const red = match.players.find((player) => player.id === (mode === 'local' ? LOCAL_RED : selfId));
   if (red && (mode === 'local' || mode === 'host')) {
     const mask = wasd.sample();
     inputSeq += 1;
     noteShotEdge(mask);
-    setInput(match, red.id, mask, inputSeq, shotSeq);
+    queueHostInput(red.id, mask, inputSeq, shotSeq);
   }
   if (mode === 'local') {
     const blue = match.players.find((player) => player.id === LOCAL_BLUE);
     if (blue) setInput(match, LOCAL_BLUE, ijkl.sample(), match.tick + 1);
   }
+  flushHostInput();
   step(match);
   paintFromMatch();
 }
 
 function flushHostSnapshot(force) {
   if (mode !== 'host' || serverHost || !match || roster.length < 2) return;
-  const waiting = match.phase === 'waiting' || match.phase === 'match_end';
+  const waiting = match.phase === 'waiting' || match.phase === 'match_end' || match.phase === 'paused';
   if (!force && !waiting && match.tick % SNAPSHOT_EVERY !== 0) return;
   const since = {};
   for (const [id, ack] of hostEventAcks) since[id] = ack;
@@ -847,7 +1135,7 @@ function takeShotAck(snap) {
 }
 
 function stepGuest() {
-  if (pickedTeam === TEAM_SPEC) {
+  if (pickedTeam === TEAM_SPEC || (latestSnap && latestSnap.phase === 'paused')) {
     shotWasDown = false;
     if (seenEventId > sentAck) {
       sentAck = seenEventId;
@@ -878,10 +1166,13 @@ function onWelcome(state) {
   transport = state.transport || transport;
   selfId = state.playerId;
   inputSeq = 0;
+  hostInputQueue = [];
   sentInputs = [];
   sentAck = 0;
   seenEventId = 0;
   seenDeathId = 0;
+  wasAlive.clear();
+  clearScoreNames();
   paint = [];
   hostEventAcks = new Map();
   renderDelay = INTERP_DELAY * 1000;
@@ -923,7 +1214,7 @@ function onRoster(players, state) {
     serverHost = !!state.serverHost;
     if (state.mapId && mapsById.has(state.mapId) && state.mapId !== mapId) {
       mapId = state.mapId;
-      if (mode === 'host' && isHost && match && (match.phase === 'waiting' || match.phase === 'match_end')) {
+      if (mode === 'host' && isHost && match && (match.phase === 'waiting' || match.phase === 'match_end' || match.phase === 'paused')) {
         rebuildHostMatch();
       }
     }
@@ -963,8 +1254,9 @@ function onGame(msg, fromId) {
     }
     paintFromSnapshot(snap);
     if (remoteView()) takeShotAck(snap);
-    if (snap.phase === 'playing' || snap.phase === 'round_end') showLobby(false);
-    else showLobby(true);
+    const onField = victoryLeft > 0 || snap.phase === 'playing' || snap.phase === 'round_end' || snap.phase === 'match_end';
+    if (onField && !lobbyEl.classList.contains('hidden')) resetInterpDelay();
+    showLobby(!onField);
   }
 }
 
@@ -1022,7 +1314,7 @@ function onRulesChanged() {
     return;
   }
   if (!match || mode === 'guest') return;
-  if (match.phase !== 'waiting' && match.phase !== 'match_end') return;
+  if (match.phase !== 'waiting' && match.phase !== 'match_end' && match.phase !== 'paused') return;
   match.rules = rules;
   match.timeLeft = rules.roundTime;
 }
@@ -1034,13 +1326,17 @@ playBtn.addEventListener('click', () => {
   if (serverHost) {
     if (!isHost) return;
     onRulesChanged();
+    resetInterpDelay();
     net.startMatch();
     return;
   }
   if (mode !== 'host' || !isHost || !match) return;
   if (match.phase === 'paused') {
+    hostInputQueue = [];
+    shotWasDown = false;
     start(match);
     showLobby(false);
+    flushHostSnapshot(true);
     return;
   }
   syncHostDiscs();
@@ -1203,8 +1499,14 @@ function frame(now) {
   if (document.hidden || frameDt > 0.25) frameDt = 0;
   tickClock(now);
   agePaint(frameDt);
+  noteMatchEnd();
+  tickVictoryHold(frameDt);
   const drawStart = performance.now();
-  renderer.draw(buildView(), frameDt);
+  const view = buildView();
+  if (view.map) noteVisibleDeaths(view.players);
+  renderer.draw(view, frameDt);
+  renderTeamBoard();
+  if (scoreboardOpen) renderScoreboard();
   const steps = simSteps;
   simSteps = 0;
   metrics.note({
@@ -1246,6 +1548,8 @@ function applyLang() {
   }
   renderMapPick();
   renderTeams();
+  renderTeamBoard();
+  if (scoreboardOpen) renderScoreboard();
 }
 
 langEl.addEventListener('change', () => {
@@ -1253,10 +1557,28 @@ langEl.addEventListener('change', () => {
   applyLang();
 });
 
-menuBtn.addEventListener('click', () => {
-  if (mode === 'host' && isHost && !serverHost) pauseMatch(match);
-  showLobby(true);
-});
+if (menuBtn) {
+  menuBtn.addEventListener('click', () => {
+    if (mode !== 'host' || !isHost) return;
+    if (serverHost) {
+      net.pauseMatch();
+      return;
+    }
+    if (!pauseMatch(match)) return;
+    hostInputQueue = [];
+    shotWasDown = false;
+    flushHostSnapshot(true);
+    showLobby(true);
+  });
+}
+
+if (scoreBtn) {
+  scoreBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setScoreboard(!scoreboardOpen);
+  });
+}
 
 mapPick.addEventListener('change', () => {
   if (mode === 'guest' || (mode === 'host' && !isHost)) {

@@ -12,6 +12,11 @@ const cam = { zoom: 1, x: 0, y: 0, ready: false };
 // Own-death cue. Short enough that a late hit reads as lag, not as a physics bug.
 const DEATH_FLASH = 0.22;
 const deathFx = { left: 0, kickX: 0, kickY: 0 };
+// Shatter is visual only. The grey corpse waits until the burst finishes.
+const SHATTER_LIFE = 0.78;
+const SHATTER_VARIANTS = 4;
+const shatters = [];
+const shattering = new Set();
 // Matches the old per-frame lerp of 0.18 at 60 Hz: 1 - exp(-k / 60) = 0.18.
 const CAM_FOLLOW_K = -Math.log(1 - 0.18) * 60;
 let frameDt = 1 / 60;
@@ -153,6 +158,97 @@ export function noteDeathFlash() {
   deathFx.kickY = Math.sin(angle);
 }
 
+export function isShattering(id) {
+  return id != null && shattering.has(id);
+}
+
+function shard(angle, dist, speed, size, spin, kind) {
+  return {
+    angle,
+    dist,
+    speed,
+    size,
+    spin,
+    kind: kind || 'wedge',
+    rot: Math.random() * Math.PI * 2,
+    grav: 0,
+  };
+}
+
+function ring(n, speed, size, spin, kind, wobble) {
+  const pieces = [];
+  const turn = Math.random() * Math.PI * 2;
+  for (let i = 0; i < n; i++) {
+    const angle = turn + (i / n) * Math.PI * 2 + (Math.random() - 0.5) * (wobble || 0.25);
+    pieces.push(shard(angle, 1 + Math.random() * 4, speed * (0.72 + Math.random() * 0.55), size * (0.65 + Math.random() * 0.7), spin, kind));
+  }
+  return pieces;
+}
+
+// Four breaks. Same disc, different way it comes apart.
+function shardsFor(variant) {
+  if (variant === 0) {
+    return ring(8, 150, 6.4, 11, 'wedge', 0.3).concat(ring(14, 210, 2.3, 16, 'chip', 0.5));
+  }
+  if (variant === 1) {
+    const base = Math.random() * Math.PI * 2;
+    const pieces = [];
+    for (let i = 0; i < 7; i++) {
+      const angle = base + (i - 3) * 0.28 + (Math.random() - 0.5) * 0.12;
+      pieces.push(shard(angle, 2 + i * 0.4, 90 + i * 28, 6.8 - i * 0.45, (Math.random() - 0.5) * 9, i % 2 ? 'chip' : 'wedge'));
+    }
+    for (let i = 0; i < 8; i++) {
+      const angle = base + Math.PI + (Math.random() - 0.5) * 1.4;
+      pieces.push(shard(angle, 1 + Math.random() * 3, 40 + Math.random() * 50, 2.2 + Math.random() * 2.4, (Math.random() - 0.5) * 14, 'chip'));
+    }
+    return pieces;
+  }
+  if (variant === 2) {
+    const pieces = ring(6, 70, 7.2, 6, 'wedge', 0.45);
+    for (let i = 0; i < 16; i++) {
+      const piece = shard(Math.random() * Math.PI * 2, Math.random() * 6, 28 + Math.random() * 90, 1.5 + Math.random() * 2.4, (Math.random() - 0.5) * 18, 'drop');
+      piece.grav = 80 + Math.random() * 160;
+      pieces.push(piece);
+    }
+    return pieces;
+  }
+  const pieces = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = -Math.PI / 2 + (i - 2.5) * 0.42 + (Math.random() - 0.5) * 0.12;
+    const piece = shard(angle, 2, 120 + Math.random() * 90, 5.2 + Math.random() * 2.2, (Math.random() - 0.5) * 10, 'wedge');
+    piece.grav = 420;
+    pieces.push(piece);
+  }
+  for (let i = 0; i < 10; i++) {
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * 1.5;
+    const piece = shard(angle, 1, 70 + Math.random() * 80, 1.8 + Math.random() * 1.6, (Math.random() - 0.5) * 14, 'drop');
+    piece.grav = 360 + Math.random() * 180;
+    pieces.push(piece);
+  }
+  return pieces;
+}
+
+export function noteShatter(event) {
+  if (!event || !Number.isFinite(event.x) || !Number.isFinite(event.y)) return;
+  const id = event.victimId;
+  if (id != null) {
+    for (let i = 0; i < shatters.length; i++) {
+      if (shatters[i].id === id) return;
+    }
+    shattering.add(id);
+  }
+  const variant = Math.floor(Math.random() * SHATTER_VARIANTS);
+  shatters.push({
+    id,
+    x: event.x,
+    y: event.y,
+    color: teamColor(event.victimTeam),
+    age: 0,
+    variant,
+    shards: shardsFor(variant),
+  });
+}
+
 export function createRenderer(canvas) {
   const ctx = canvas.getContext('2d');
   // Caller caps and fades paint (MAX_PAINT). This file only draws the list.
@@ -190,18 +286,93 @@ export function createRenderer(canvas) {
       ctx.save();
       ctx.setTransform(fitted.scale * dpr, 0, 0, fitted.scale * dpr, fitted.offsetX * dpr, fitted.offsetY * dpr);
       drawWorld(ctx, v, map, fitted.scale, eye);
+      drawShatters(ctx, map, eye);
       ctx.restore();
       drawNicks(ctx, v.players, fitted, map, eye);
     }
 
-    drawHud(ctx, v.hud);
+    drawHud(ctx, v.hud, cssW, cssH);
+    if (v.banners) drawSplitBanners(ctx, v.hud, v.banners, cssW, cssH);
     drawDeathFlash(ctx, cssW, cssH);
   }
 
   window.addEventListener('resize', resize);
   resize();
 
-  return { draw, resize, flashDeath: noteDeathFlash };
+  return { draw, resize, flashDeath: noteDeathFlash, shatter: noteShatter, isShattering };
+}
+
+function easeOut(t) {
+  const u = 1 - t;
+  return 1 - u * u;
+}
+
+function drawShard(ctx, x, y, size, rot, kind) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.beginPath();
+  if (kind === 'drop') {
+    ctx.arc(0, 0, size, 0, Math.PI * 2);
+  } else if (kind === 'chip') {
+    ctx.moveTo(size, 0);
+    ctx.lineTo(-size * 0.2, size * 0.45);
+    ctx.lineTo(-size * 0.55, -size * 0.15);
+  } else {
+    ctx.moveTo(size * 1.15, 0);
+    ctx.lineTo(-size * 0.25, size * 0.85);
+    ctx.lineTo(-size * 0.85, -size * 0.2);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawShatters(ctx, map, eye) {
+  if (!shatters.length) return;
+  shattering.clear();
+  ctx.save();
+  for (let i = shatters.length - 1; i >= 0; i--) {
+    const burst = shatters[i];
+    burst.age += frameDt;
+    const t = burst.age / SHATTER_LIFE;
+    if (t >= 1) {
+      shatters.splice(i, 1);
+      continue;
+    }
+    if (burst.id != null) shattering.add(burst.id);
+    if (hiddenFrom(map, eye, burst.x, burst.y, PLAYER_RADIUS)) continue;
+    const fly = easeOut(Math.min(1, t / 0.72));
+    const alpha = t < 0.62 ? 1 : (1 - t) / 0.38;
+    const age = burst.age;
+    ctx.fillStyle = burst.color;
+    if (t < 0.14) {
+      ctx.globalAlpha = 1 - t / 0.14;
+      fillCircle(ctx, burst.x, burst.y, PLAYER_RADIUS * (1.35 - t * 4));
+    }
+    if (t < 0.22) {
+      ctx.globalAlpha = 0.55 * (1 - t / 0.22);
+      ctx.fillStyle = '#ffffff';
+      fillCircle(ctx, burst.x, burst.y, PLAYER_RADIUS * (0.35 + t * 6));
+      ctx.fillStyle = burst.color;
+    }
+    ctx.globalAlpha = alpha;
+    for (let s = 0; s < burst.shards.length; s++) {
+      const piece = burst.shards[s];
+      const dist = piece.dist + piece.speed * fly;
+      const drop = piece.grav ? piece.grav * age * age : 0;
+      const scale = piece.kind === 'drop' ? 1 - t * 0.15 : 1 - t * 0.4;
+      drawShard(
+        ctx,
+        burst.x + Math.cos(piece.angle) * dist,
+        burst.y + Math.sin(piece.angle) * dist + drop,
+        piece.size * scale,
+        piece.rot + piece.spin * age,
+        piece.kind,
+      );
+    }
+  }
+  ctx.restore();
 }
 
 function drawDeathFlash(ctx, cssW, cssH) {
@@ -369,20 +540,21 @@ function drawWorld(ctx, view, map, scale, eye) {
 function drawPlayer(ctx, player, selfId, scale, blinkOff) {
   if (!player || !Number.isFinite(player.x) || !Number.isFinite(player.y)) return;
   const dead = player.alive === false;
+  const bursting = dead && isShattering(player.id);
   const color = dead ? COLOR.dead : teamColor(player.team);
   const faint = player.invuln > 0 && blinkOff;
 
   ctx.save();
   ctx.globalAlpha = faint ? FAINT : 1;
   ctx.fillStyle = color;
-  fillCircle(ctx, player.x, player.y, PLAYER_RADIUS);
+  if (!bursting) fillCircle(ctx, player.x, player.y, PLAYER_RADIUS);
   if (!dead) {
     const face = facingOf(player);
     drawMarker(ctx, player.x, player.y, face.fx, face.fy, reloadProgress(player));
   }
   ctx.restore();
 
-  if (selfId != null && player.id === selfId) {
+  if (!bursting && selfId != null && player.id === selfId) {
     drawSelfRing(ctx, player, scale, color);
   }
 }
@@ -421,8 +593,12 @@ function drawNicks(ctx, players, fitted, map, eye) {
   }
 }
 
-function drawHud(ctx, hud) {
+function drawHud(ctx, hud, cssW, cssH) {
   if (!hud || hud.phase === 'waiting' || !hud.phase) return;
+  if (hud.phase === 'match_end' || (hud.phase === 'round_end' && !hud.split)) {
+    drawMatchBanner(ctx, hud, cssW, cssH);
+    return;
+  }
   const score = hud.score || {};
   const red = score.red == null ? 0 : score.red;
   const blue = score.blue == null ? 0 : score.blue;
@@ -467,6 +643,67 @@ function drawHud(ctx, hud) {
 
   ctx.restore();
   drawAmmo(ctx, hud.ammo);
+}
+
+function bannerTitle(hud) {
+  if (hud.phase === 'round_end') return t('roundWin');
+  return hud.message ? String(hud.message) : '';
+}
+
+function drawMatchBanner(ctx, hud, cssW, cssH) {
+  const score = hud.score || {};
+  const red = score.red == null ? 0 : score.red;
+  const blue = score.blue == null ? 0 : score.blue;
+  const winner = hud.winner === 'blue' ? 'blue' : 'red';
+  const title = bannerTitle(hud);
+  const w = cssW > 0 ? cssW : ctx.canvas.width / (window.devicePixelRatio || 1);
+  const h = cssH > 0 ? cssH : ctx.canvas.height / (window.devicePixelRatio || 1);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(7, 8, 12, 0.55)';
+  ctx.fillRect(0, 0, w, h);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = winner === 'blue' ? COLOR.blue : COLOR.red;
+  ctx.font = '700 ' + Math.max(42, Math.min(108, w * 0.09)) + 'px sans-serif';
+  ctx.fillText(title, w / 2, h / 2 - 18);
+  ctx.fillStyle = COLOR.text;
+  ctx.font = '28px sans-serif';
+  ctx.fillText(red + ' : ' + blue, w / 2, h / 2 + 52);
+  ctx.restore();
+}
+
+function drawSplitBanners(ctx, hud, banners, cssW, cssH) {
+  if (!Array.isArray(banners) || banners.length < 2) return;
+  const w = cssW > 0 ? cssW : ctx.canvas.width / (window.devicePixelRatio || 1);
+  const h = cssH > 0 ? cssH : ctx.canvas.height / (window.devicePixelRatio || 1);
+  const half = w / 2;
+  ctx.save();
+  ctx.fillStyle = 'rgba(7, 8, 12, 0.55)';
+  ctx.fillRect(0, 0, w, h);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '700 ' + Math.max(28, Math.min(72, half * 0.16)) + 'px sans-serif';
+  for (let i = 0; i < banners.length; i++) {
+    const banner = banners[i];
+    if (!banner) continue;
+    const cx = banner.team === 'blue' ? half + half / 2 : half / 2;
+    ctx.fillStyle = banner.lost ? '#b9a24a' : (banner.team === 'blue' ? COLOR.blue : COLOR.red);
+    if (banner.lost) {
+      ctx.save();
+      ctx.translate(cx, h / 2);
+      ctx.rotate(-0.08);
+      ctx.fillText(banner.title, 0, 0);
+      ctx.restore();
+    } else {
+      ctx.fillText(banner.title, cx, h / 2);
+    }
+  }
+  const score = hud && hud.score ? hud.score : {};
+  ctx.fillStyle = COLOR.text;
+  ctx.font = '28px sans-serif';
+  ctx.fillText((score.red == null ? 0 : score.red) + ' : ' + (score.blue == null ? 0 : score.blue), w / 2, h / 2 + 64);
+  ctx.restore();
 }
 
 function drawAmmo(ctx, ammo) {

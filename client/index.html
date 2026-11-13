@@ -458,11 +458,15 @@
     #hotseat.hidden {
       display: none;
     }
-    #menu {
+    #corner {
       position: fixed;
       top: 12px;
       right: 12px;
       z-index: 3;
+      display: flex;
+      gap: 8px;
+    }
+    #corner button {
       font: inherit;
       color: #f2f2f2;
       background: rgba(16, 18, 20, 0.82);
@@ -471,11 +475,91 @@
       padding: 8px 12px;
       cursor: pointer;
     }
-    #menu:hover {
+    #corner button:hover,
+    #corner button.on {
       background: #2a3644;
     }
-    #menu.hidden {
+    #corner button.hidden {
       display: none;
+    }
+    #team-board,
+    #scoreboard {
+      position: fixed;
+      z-index: 3;
+      color: #f2f2f2;
+      background: rgba(16, 18, 20, 0.82);
+      border: 1px solid #3a4450;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    #team-board {
+      right: 16px;
+      bottom: 16px;
+      pointer-events: none;
+      background: rgba(16, 18, 20, 0.34);
+      border-color: rgba(58, 68, 80, 0.35);
+    }
+    #scoreboard {
+      top: 52px;
+      right: 12px;
+      display: flex;
+      gap: 16px;
+    }
+    #scoreboard h2 {
+      margin: 0 0 6px;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+    }
+    #scoreboard .side.red h2 {
+      color: #e23d3d;
+    }
+    #scoreboard .side.blue h2 {
+      color: #3d7de2;
+    }
+    #team-board.hidden,
+    #scoreboard.hidden {
+      display: none;
+    }
+    #team-board table,
+    #scoreboard table {
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    #team-board th,
+    #scoreboard th,
+    #team-board td,
+    #scoreboard td {
+      padding: 3px 8px;
+      text-align: left;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    #team-board th,
+    #scoreboard th {
+      color: #9aa6b2;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    #team-board td:not(:first-child),
+    #scoreboard td:not(:first-child) {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    #team-board tr.red td,
+    #scoreboard .side.red td:first-child {
+      color: #e23d3d;
+    }
+    #team-board tr.blue td,
+    #scoreboard .side.blue td:first-child {
+      color: #3d7de2;
+    }
+    #team-board tr.self td:first-child,
+    #scoreboard tr.self td:first-child {
+      font-weight: 700;
+    }
+    #team-board tr.dead td {
+      color: #9aa3ad;
     }
     #lang-pick {
       position: fixed;
@@ -510,7 +594,53 @@
 </head>
 <body>
   <canvas id="view"></canvas>
-  <button type="button" id="menu" class="hidden" data-i18n="menu">Lobby</button>
+  <div id="corner">
+    <button type="button" id="score-btn" class="hidden" data-i18n="scoreboard">Wyniki</button>
+    <button type="button" id="menu" class="hidden" data-i18n="menu">Lobby</button>
+  </div>
+  <div id="team-board" class="hidden" hidden>
+    <table>
+      <thead>
+        <tr>
+          <th data-i18n="nick">Nick</th>
+          <th data-i18n="kills">K</th>
+          <th data-i18n="deaths">D</th>
+          <th data-i18n="kd">K/D</th>
+        </tr>
+      </thead>
+      <tbody id="team-board-body"></tbody>
+    </table>
+  </div>
+  <div id="scoreboard" class="hidden" hidden>
+    <section class="side red">
+      <h2 data-i18n="hudRed">czerwoni</h2>
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="nick">Nick</th>
+            <th data-i18n="kills">K</th>
+            <th data-i18n="deaths">D</th>
+            <th data-i18n="kd">K/D</th>
+          </tr>
+        </thead>
+        <tbody id="score-red"></tbody>
+      </table>
+    </section>
+    <section class="side blue">
+      <h2 data-i18n="hudBlue">niebiescy</h2>
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="nick">Nick</th>
+            <th data-i18n="kills">K</th>
+            <th data-i18n="deaths">D</th>
+            <th data-i18n="kd">K/D</th>
+          </tr>
+        </thead>
+        <tbody id="score-blue"></tbody>
+      </table>
+    </section>
+  </div>
   <label id="lang-pick">
     <span data-i18n="lang">Język</span>
     <select id="lang">

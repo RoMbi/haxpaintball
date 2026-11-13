@@ -185,6 +185,10 @@ export function createNet(handlers) {
     enqueue({ t: ClientMsg.START });
   }
 
+  function pauseMatch() {
+    enqueue({ t: ClientMsg.PAUSE });
+  }
+
   function setRules(rules) {
     enqueue({
       t: ClientMsg.RULES,
@@ -573,6 +577,7 @@ export function createNet(handlers) {
     shuffleTeams,
     setMap,
     startMatch,
+    pauseMatch,
     setRules,
     leaveRoom,
     sendInput,

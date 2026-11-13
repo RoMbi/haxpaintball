@@ -90,7 +90,7 @@ Three layers. Do not mix them.
 
 - Physics and collisions stay in `shared/sim.js`. The browser host and the server host both call that `step()`. Do not copy the loop a second time.
 - Roster, start, and rules live in `shared/authority.js`. A team change during a round does not respawn. A match starts from **Graj** / **Play**, not from the shoot key.
-- A guest does not run a local body and does not draw a shot before the referee has one. Input goes out immediately. The guest, and a player in a server-hosted room, draws every disc from snapshot interpolation, including their own. The browser host still steps its own disc locally, because that tab is the referee.
+- A guest does not run a local body and does not draw a shot before the referee has one. Input goes out immediately. The guest, and a player in a server-hosted room, draws every disc from snapshot interpolation, including their own. The browser host still steps and draws its own disc locally, because that tab is the referee. Its own mask is held for `HOST_INPUT_DELAY` ticks, the same floor the guest view already sits behind, so a join does not leave the host instant. Do not apply that mask on the sample tick. Local sandbox is not delayed.
 - A shot is an edge. The client repeats `shot` until the snapshot returns `shotAck`. A second packet with the same number does not fire twice.
 - A map is JSON: `bounds`, `segments`, `discs`, `spawns.red`, `spawns.blue`. Physics does not know the shape of a field. The list the server accepts is `MAP_IDS` in `server/index.js`. A file also needs an entry in `maps/index.json` or the lobby will not show it.
 - The wire protocol is JSON with a `t` field. Names are in `shared/protocol.js`. Do not send bare strings from the client.
