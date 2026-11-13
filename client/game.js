@@ -11,6 +11,13 @@ import {
   TEAM_SPEC,
   BULLET_LIFE,
   BULLET_SPIN,
+  BULLET_SPEED,
+  BULLET_INHERIT,
+  BULLET_RADIUS,
+  PLAYER_RADIUS,
+  MARKER_ALONG,
+  MARKER_RIGHT,
+  MARKER_TIP,
 } from '../shared/constants.js';
 import {
   createMatch,
@@ -107,6 +114,9 @@ let delayQuietSince = 0;
 let shotSeq = 0;
 let shotAck = 0;
 let shotWasDown = false;
+// Own shots drawn before the snapshot returns. Authority still decides the hit.
+let localShots = [];
+let localShotId = 0;
 
 const metrics = createClientMetrics();
 const net = createNet({
@@ -340,7 +350,6 @@ function rebuildHostMatch() {
   paint = [];
   seenEventId = 0;
   seenDeathId = 0;
-  tryStart();
 }
 
 function teamOf(value) {
@@ -680,11 +689,13 @@ function remoteView() {
 function buildView() {
   const visibleMap = fieldVisible() ? map : null;
   if (remoteView() && latestSnap) {
-    const span = interpSpan(performance.now());
+    const nowMs = performance.now();
+    const span = interpSpan(nowMs);
+    const bullets = span ? drawBulletsFromSpan(span) : [];
     return {
       map: visibleMap,
       players: span ? drawPlayersFromSpan(span) : [],
-      bullets: span ? drawBulletsFromSpan(span) : [],
+      bullets: bullets.concat(localShotBullets(nowMs)),
       paint,
       selfId,
       los: true,
@@ -741,9 +752,91 @@ function rememberInput(seq, mask) {
 // the referee answers with shotAck, so a lost packet is not a lost shot.
 function noteShotEdge(mask) {
   const down = (mask & KEY.SHOOT) !== 0;
-  if (down && !shotWasDown) shotSeq += 1;
+  if (down && !shotWasDown) {
+    shotSeq += 1;
+    spawnLocalShot();
+  }
   shotWasDown = down;
   return shotSeq;
+}
+
+// Visual only. The referee still owns the real bullet, so a ghost that the
+// host never spawned just expires. It must not decide a hit.
+function spawnLocalShot() {
+  if (!remoteView()) return;
+  if (!latestSnap || latestSnap.phase !== 'playing') return;
+  const self = selfOnScreen();
+  if (!self || self.alive === false) return;
+  if (self.invuln > 0 || self.reloading || (self.ammo != null && self.ammo <= 0)) return;
+  let fx = self.fx;
+  let fy = self.fy;
+  const flen = Math.hypot(fx, fy);
+  if (flen < 1e-8) {
+    fx = 1;
+    fy = 0;
+  } else {
+    fx /= flen;
+    fy /= flen;
+  }
+  const gripX = self.x + fx * PLAYER_RADIUS * MARKER_ALONG - fy * PLAYER_RADIUS * MARKER_RIGHT;
+  const gripY = self.y + fy * PLAYER_RADIUS * MARKER_ALONG + fx * PLAYER_RADIUS * MARKER_RIGHT;
+  const muzzle = MARKER_TIP + BULLET_RADIUS + 1;
+  localShotId += 1;
+  localShots.push({
+    id: localShotId,
+    shotSeq,
+    team: self.team,
+    x: gripX + fx * muzzle,
+    y: gripY + fy * muzzle,
+    vx: fx * BULLET_SPEED + (self.vx || 0) * BULLET_INHERIT,
+    vy: fy * BULLET_SPEED + (self.vy || 0) * BULLET_INHERIT,
+    born: performance.now(),
+  });
+}
+
+function localShotBullets(nowMs) {
+  if (!localShots.length) return [];
+  const kept = [];
+  const drawn = [];
+  const hide = ownBulletInView();
+  for (const shot of localShots) {
+    const age = (nowMs - shot.born) / 1000;
+    // shotAck is the referee saying this edge was consumed. Until then the
+    // delayed view has not caught the ball, so the ghost has to keep flying.
+    if (age < 0 || age > BULLET_LIFE || shotAck >= shot.shotSeq) continue;
+    kept.push(shot);
+    if (hide) continue;
+    drawn.push({
+      id: 'local-' + shot.id,
+      owner: selfId,
+      team: shot.team,
+      x: shot.x + shot.vx * age,
+      y: shot.y + shot.vy * age,
+      life: BULLET_LIFE - age,
+      spin: 1,
+      angle: 0,
+    });
+  }
+  localShots = kept;
+  return drawn;
+}
+
+function selfOnScreen() {
+  const span = interpSpan(performance.now());
+  if (span) {
+    const drawn = drawPlayersFromSpan(span).find((player) => player.id === selfId);
+    if (drawn) return drawn;
+  }
+  return hydratePlayer(findSnapPlayer(latestSnap, selfId));
+}
+
+function ownBulletInView() {
+  const span = interpSpan(performance.now());
+  if (!span || !span.to || !span.to.bullets) return false;
+  for (const bullet of span.to.bullets) {
+    if (bullet.owner === selfId) return true;
+  }
+  return false;
 }
 
 function takeShotAck(snap) {

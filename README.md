@@ -88,10 +88,13 @@ Three layers. Do not mix them.
 | `client/` | Loop, lobby, rendering. In a normal room the host's browser is the match authority. |
 | `shared/` | Constants, collisions, simulation, message names. The contract for host, guest, and server. |
 
-- Physics and collisions stay in `shared/sim.js`. A guest predicts with the same code the authority runs, whether that authority is a browser or the server. Do not copy that loop a second time.
-- A map is JSON: `bounds`, `segments`, `discs`, `spawns.red`, `spawns.blue`. Physics does not know the shape of a field.
-- A new map needs three things: a file in `maps/`, an entry in `m- Code comments are in English, and only where they explain a tuning choice. Lobby copy is in `client/i18n.js`, Polish and English. The select is hidden during a match and returns with the Lobby button. Names such as `HaxPaintball`, `Nick`, `Red`, `Blue`, `Spec`, and room codes stay as they are. The `?metrics=1` HUD is not translated.protocol is JSON with a `t` field. Names are in `shared/protocol.js`. Do not send bare strings from the client.
+- Physics and collisions stay in `shared/sim.js`. The browser host and the server host both call that `step()`. Do not copy the loop a second time.
+- Roster, start, and rules live in `shared/authority.js`. A team change during a round does not respawn. A match starts from **Graj** / **Play**, not from the shoot key.
+- A guest does not run a local body and does not draw a shot before the referee has one. Input goes out immediately. The guest, and a player in a server-hosted room, draws every disc from snapshot interpolation, including their own. The browser host still steps its own disc locally, because that tab is the referee.
+- A shot is an edge. The client repeats `shot` until the snapshot returns `shotAck`. A second packet with the same number does not fire twice.
+- A map is JSON: `bounds`, `segments`, `discs`, `spawns.red`, `spawns.blue`. Physics does not know the shape of a field. The list the server accepts is `MAP_IDS` in `server/index.js`. A file also needs an entry in `maps/index.json` or the lobby will not show it.
+- The wire protocol is JSON with a `t` field. Names are in `shared/protocol.js`. Do not send bare strings from the client.
 - Input is the `KEY` bit mask from `shared/constants.js`.
 - The server only serves `client`, `shared`, and `maps`. Paths with `..` are rejected.
-- Code comments are in English, and only where they explain a tuning choice. Lobby copy is in Polish.
+- Code comments are in English, and only where they explain a tuning choice. Lobby copy is in `client/i18n.js`, Polish and English. The select is hidden during a match and returns with the Lobby button. Names such as `HaxPaintball`, `Nick`, `Red`, `Blue`, `Spec`, and room codes stay as they are. The `?metrics=1` HUD is not translated.
 - There is no bundler, linter, or database. `npm start` is the deploy. `npm test` runs `shared/sim.test.js`.

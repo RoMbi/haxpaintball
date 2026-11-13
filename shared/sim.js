@@ -185,7 +185,9 @@ export function shotWanted(player, mask) {
   const shooting = (mask & KEY.SHOOT) !== 0;
   const pending = (player.shotSeq | 0) > (player.shotAck | 0);
   if (!shooting && !pending) return false;
-  if (player.triggerWasDown && !pending) return false;
+  // A held key with no new edge is still a shot, just the slow one.
+  // Cooldown decides when it actually spawns. Dropping it here made every
+  // follow-up look like a fresh tap.
   return true;
 }
 
@@ -324,8 +326,11 @@ export function step(match) {
       player.cooldown = Math.max(0, player.cooldown - DT);
       player.invuln = Math.max(0, player.invuln - DT);
       tickReload(player);
+      const keyDown = (mask & KEY.SHOOT) !== 0;
       const shooting = shotWanted(player, mask);
-      if (!shooting) player.triggerWasDown = false;
+      // Release is the only thing that clears the hold. A tick that is still
+      // waiting on cooldown is not a release.
+      if (!keyDown) player.triggerWasDown = false;
       if (shooting && player.cooldown <= 0 && player.invuln <= 0 && !player.reloading && player.ammo > 0) {
         if (spawnBullet(match, player)) {
           noteShot(player);

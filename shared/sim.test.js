@@ -8,6 +8,8 @@ import {
   KEY,
   PLAYER_RADIUS,
   BULLET_RADIUS,
+  BULLET_COOLDOWN,
+  BULLET_TAP_RATE,
   BULLET_SPREAD,
   SPAWN_INVULN,
   ROUND_END_PAUSE,
@@ -119,6 +121,40 @@ test('spychanie dwóch dysków rozdziela je na co najmniej sumę promieni', () =
   const dist = Math.hypot(blue.x - red.x, blue.y - red.y);
   assert.ok(dist >= PLAYER_RADIUS * 2 - 1e-4, `dist=${dist} dyski się przenikają`);
   assert.ok(blue.x > 400 + PLAYER_RADIUS, `blue.x=${blue.x} nie został odepchnięty`);
+});
+
+test('trzymana spacja strzela wolniej niż szybkie klikanie', () => {
+  const holdTicks = Math.round(BULLET_COOLDOWN / DT);
+  const tapTicks = Math.max(1, Math.round(BULLET_TAP_RATE / DT));
+  assert.ok(holdTicks > tapTicks, 'hold nie jest wolniejszy od tapu');
+
+  function countShots(drive, ticks) {
+    const { match, red } = makePlaying(boxMap());
+    red.ammo = 50;
+    red.cooldown = 0;
+    let shots = 0;
+    for (let tick = 1; tick <= ticks; tick++) {
+      const before = match.bullets.length;
+      drive(match, red, tick);
+      step(match);
+      shots += Math.max(0, match.bullets.length - before);
+    }
+    return shots;
+  }
+
+  const ticks = holdTicks * 3 + 1;
+  // Same shape as the client: shotSeq bumps on key-down and stays until ack.
+  const held = countShots((match, red, tick) => {
+    setInput(match, red.id, KEY.SHOOT, tick, 1);
+  }, ticks);
+  const tapped = countShots((match, red, tick) => {
+    const down = tick % (tapTicks + 1) === 1;
+    const edge = Math.floor((tick - 1) / (tapTicks + 1)) + 1;
+    setInput(match, red.id, down ? KEY.SHOOT : 0, tick, edge);
+  }, ticks);
+
+  assert.equal(held, 4, `hold wystrzelił ${held} zamiast 4`);
+  assert.ok(tapped > held, `tap=${tapped} nie jest szybszy od hold=${held}`);
 });
 
 test('pocisk przez róg nie przelatuje na drugą stronę ściany', () => {
