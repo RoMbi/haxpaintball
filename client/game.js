@@ -80,7 +80,17 @@ const joinRow = document.querySelector('#join-row');
 const roomBar = document.querySelector('#room-bar');
 const roomCodeEl = document.querySelector('#room-code');
 const copyCodeBtn = document.querySelector('#copy-code');
+const copyLinkBtn = document.querySelector('#copy-link');
 const leaveBtn = document.querySelector('#leave');
+const matchSetup = document.querySelector('#match-setup');
+const entrySwitch = document.querySelector('#entry-switch');
+const hostPanel = document.querySelector('#host-panel');
+const joinPanel = document.querySelector('#join-panel');
+const showHostBtn = document.querySelector('#show-host');
+const showJoinBtn = document.querySelector('#show-join');
+const matchIdEl = document.querySelector('#match-id');
+const newMatchIdBtn = document.querySelector('#new-match-id');
+const copyMatchLinkBtn = document.querySelector('#copy-match-link');
 const shuffleBtn = document.querySelector('#shuffle');
 const playBtn = document.querySelector('#play');
 const teamsEl = document.querySelector('#teams');
@@ -139,6 +149,7 @@ const net = createNet({
   onClosed,
   onError,
   onTransport,
+  onReserved,
 });
 
 function setStatus(text) {
@@ -146,20 +157,39 @@ function setStatus(text) {
 }
 
 let victoryLeft = 0;
+let victoryHeld = false;
 
 function currentPhase() {
   if (mode === 'guest' || serverHost) return latestSnap ? latestSnap.phase : '';
   return match ? match.phase : '';
 }
 
+function clearVictoryHold() {
+  victoryLeft = 0;
+  victoryHeld = false;
+}
+
 function noteMatchEnd() {
-  if (currentPhase() === 'match_end') beginVictoryHold();
+  if (currentPhase() !== 'match_end') {
+    clearVictoryHold();
+    return;
+  }
+  // Once per match. Restarting after expiry flashed the lobby for one frame
+  // and hid Play before a click could land.
+  if (victoryHeld) return;
+  beginVictoryHold();
 }
 
 function beginVictoryHold() {
-  if (victoryLeft > 0) return;
+  victoryHeld = true;
   victoryLeft = VICTORY_HOLD;
   showLobby(false);
+}
+
+function finishVictoryHold() {
+  victoryHeld = true;
+  victoryLeft = 0;
+  showLobby(true);
 }
 
 function tickVictoryHold(dt) {
@@ -168,6 +198,12 @@ function tickVictoryHold(dt) {
   if (victoryLeft > 0) return;
   victoryLeft = 0;
   if (currentPhase() === 'match_end' || currentPhase() === 'waiting') showLobby(true);
+}
+
+function lobbyWanted(phase) {
+  if (phase === 'playing' || phase === 'round_end') return false;
+  if (phase === 'match_end') return victoryHeld && victoryLeft <= 0;
+  return true;
 }
 
 function showLobby(show) {
@@ -192,13 +228,55 @@ function showLobby(show) {
   renderRules();
 }
 
+function cleanMatchId(value) {
+  return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+}
+
+function matchLink(code) {
+  const url = new URL(location.href);
+  url.search = '';
+  url.hash = '';
+  if (code) url.searchParams.set('match', code);
+  return url.toString();
+}
+
+function linkCode() {
+  try {
+    return cleanMatchId(new URL(location.href).searchParams.get('match'));
+  } catch {
+    return '';
+  }
+}
+
+function setMatchUrl(code) {
+  const next = matchLink(code);
+  if (location.href === next) return;
+  history.replaceState(null, '', next);
+}
+
+let lobbyPane = 'join';
+let pendingMatchId = '';
+let reserving = false;
+
+function showEntryPane(pane) {
+  lobbyPane = pane === 'join' ? 'join' : 'host';
+  if (hostPanel) hostPanel.hidden = lobbyPane !== 'host';
+  if (joinPanel) joinPanel.hidden = lobbyPane !== 'join';
+  if (matchSetup) matchSetup.hidden = false;
+  if (showHostBtn) showHostBtn.classList.toggle('on', lobbyPane === 'host');
+  if (showJoinBtn) showJoinBtn.classList.toggle('on', lobbyPane === 'join');
+}
+
 function renderTeams() {
   const inRoom = mode === 'host' || mode === 'guest';
   roomBar.classList.toggle('visible', inRoom);
   roomCodeEl.textContent = inRoom && roomCode ? t('room', { code: roomCode }) : '';
+  if (entrySwitch) entrySwitch.hidden = inRoom;
+  if (hostPanel) hostPanel.hidden = inRoom ? !isHost : lobbyPane !== 'host';
+  if (matchSetup) matchSetup.hidden = false;
+  if (joinPanel) joinPanel.hidden = inRoom || lobbyPane !== 'join';
   createBtn.hidden = inRoom;
   serverHostEl.hidden = inRoom;
-  joinRow.hidden = inRoom;
   teamsEl.classList.toggle('visible', inRoom);
   shuffleBtn.classList.toggle('visible', inRoom && isHost);
   const paused = serverHost
@@ -349,8 +427,7 @@ function loadRules() {
 }
 
 function renderRules() {
-  const locked = mode === 'guest' || (serverHost && !isHost);
-  rulesRow.hidden = mode === 'guest';
+  const locked = mode === 'guest' || (mode === 'host' && !isHost);
   roundTimeEl.disabled = locked;
   winsNeededEl.disabled = locked;
 }
@@ -428,6 +505,7 @@ function resetLocalMatch() {
   shotSeq = 0;
   shotAck = 0;
   shotWasDown = false;
+  clearVictoryHold();
   showLobby(true);
 }
 
@@ -1162,7 +1240,10 @@ function tickMatch() {
 
 function onWelcome(state) {
   connecting = false;
+  reserving = false;
+  pendingMatchId = '';
   roomCode = state.roomCode || '';
+  setMatchUrl(roomCode);
   transport = state.transport || transport;
   selfId = state.playerId;
   inputSeq = 0;
@@ -1183,6 +1264,7 @@ function onWelcome(state) {
   latestSnap = null;
   latestSnapAt = 0;
   snapBuffer = [];
+  clearVictoryHold();
   showLobby(true);
   setStatus('');
   isHost = !!state.isHost;
@@ -1254,14 +1336,21 @@ function onGame(msg, fromId) {
     }
     paintFromSnapshot(snap);
     if (remoteView()) takeShotAck(snap);
-    const onField = victoryLeft > 0 || snap.phase === 'playing' || snap.phase === 'round_end' || snap.phase === 'match_end';
-    if (onField && !lobbyEl.classList.contains('hidden')) resetInterpDelay();
-    showLobby(!onField);
+    // match_end is on the field only until the hold ends. After that a snapshot
+    // must not hide the lobby, or Play never stays clickable.
+    const wantLobby = lobbyWanted(snap.phase);
+    const lobbyOpen = !lobbyEl.classList.contains('hidden');
+    if (wantLobby === lobbyOpen) return;
+    if (!wantLobby) resetInterpDelay();
+    showLobby(wantLobby);
   }
 }
 
 function leaveRoomToSandbox(message) {
   connecting = false;
+  reserving = false;
+  pendingMatchId = '';
+  setMatchUrl('');
   if (mode === 'local' && match) {
     setStatus(message || '');
     showLobby(true);
@@ -1277,8 +1366,28 @@ function onClosed(reason) {
 
 function onError(message) {
   connecting = false;
+  if (reserving) {
+    reserving = false;
+    pendingMatchId = '';
+    setStatus(serverError(message || 'error'));
+    return;
+  }
   setStatus(serverError(message || 'error'));
   showLobby(true);
+}
+
+function onReserved(code) {
+  if (!reserving) return;
+  reserving = false;
+  const next = cleanMatchId(code);
+  if (matchIdEl && next) matchIdEl.value = next;
+  setStatus('');
+  if (pendingMatchId === 'create') {
+    pendingMatchId = '';
+    createRoom(next);
+    return;
+  }
+  pendingMatchId = '';
 }
 
 function onTransport(next) {
@@ -1403,6 +1512,17 @@ copyCodeBtn.addEventListener('click', async (event) => {
   setStatus(ok ? t('copied') : roomCode);
 });
 
+if (copyLinkBtn) {
+  copyLinkBtn.addEventListener('click', async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!roomCode) return;
+    const link = matchLink(roomCode);
+    const ok = await copyRoomCode(link);
+    setStatus(ok ? t('copiedLink') : link);
+  });
+}
+
 leaveBtn.addEventListener('click', () => {
   if (mode !== 'host' && mode !== 'guest') return;
   net.leaveRoom();
@@ -1410,9 +1530,23 @@ leaveBtn.addEventListener('click', () => {
   leaveRoomToSandbox('');
 });
 
-createBtn.addEventListener('click', () => {
-  if (connecting) return;
-  if (mode !== 'local') return;
+function requestMatchId(code, next) {
+  if (connecting || reserving || mode !== 'local') return;
+  reserving = true;
+  pendingMatchId = next || '';
+  setStatus(t('connecting'));
+  net.connect();
+  net.reserveCode(cleanMatchId(code));
+  window.setTimeout(() => {
+    if (!reserving) return;
+    reserving = false;
+    pendingMatchId = '';
+    setStatus(t('noResponse'));
+  }, 4000);
+}
+
+function createRoom(code) {
+  if (connecting || mode !== 'local') return;
   rememberNick();
   connecting = true;
   setStatus(t('connecting'));
@@ -1422,19 +1556,57 @@ createBtn.addEventListener('click', () => {
     team: pickedTeam,
     mapId,
     serverHost: serverHostCheck.checked,
+    code: cleanMatchId(code),
   });
   window.setTimeout(() => {
     if (!connecting || mode !== 'local') return;
     connecting = false;
     setStatus(t('noResponse'));
   }, 4000);
+}
+
+createBtn.addEventListener('click', () => {
+  const code = matchIdEl ? cleanMatchId(matchIdEl.value) : '';
+  if (!code) {
+    requestMatchId('', 'create');
+    return;
+  }
+  createRoom(code);
 });
 
-joinBtn.addEventListener('click', () => {
-  if (connecting) return;
+if (newMatchIdBtn) {
+  newMatchIdBtn.addEventListener('click', () => {
+    requestMatchId('', '');
+  });
+}
+
+if (copyMatchLinkBtn) {
+  copyMatchLinkBtn.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const code = matchIdEl ? cleanMatchId(matchIdEl.value) : '';
+    if (!code) {
+      setStatus(t('needCode'));
+      return;
+    }
+    const link = matchLink(code);
+    const ok = await copyRoomCode(link);
+    setStatus(ok ? t('copiedLink') : link);
+  });
+}
+
+if (showHostBtn) showHostBtn.addEventListener('click', () => showEntryPane('host'));
+if (showJoinBtn) showJoinBtn.addEventListener('click', () => showEntryPane('join'));
+if (matchIdEl) {
+  matchIdEl.addEventListener('input', () => {
+    matchIdEl.value = cleanMatchId(matchIdEl.value);
+  });
+}
+
+function joinRoom(code) {
+  if (connecting || reserving) return;
   if (mode !== 'local') return;
-  const code = codeEl.value.trim();
-  if (!code) {
+  const next = cleanMatchId(code);
+  if (!next) {
     setStatus(t('needCode'));
     return;
   }
@@ -1442,7 +1614,11 @@ joinBtn.addEventListener('click', () => {
   connecting = true;
   setStatus(t('connecting'));
   net.connect();
-  net.joinRoom({ code, nick: nickOr(t('player')), team: pickedTeam });
+  net.joinRoom({ code: next, nick: nickOr(t('player')), team: pickedTeam });
+}
+
+joinBtn.addEventListener('click', () => {
+  joinRoom(codeEl.value);
 });
 
 let last = 0;
@@ -1539,6 +1715,7 @@ function applyLang() {
   }
   labelText(document.querySelector('#nick-label'), 'nick');
   labelText(document.querySelector('#map-label'), 'map');
+  labelText(document.querySelector('#match-id-label'), 'matchId');
   labelText(document.querySelector('#round-time-label'), 'roundTime');
   labelText(document.querySelector('#wins-needed-label'), 'winsNeeded');
   if (mode === 'local') {
@@ -1560,6 +1737,10 @@ langEl.addEventListener('change', () => {
 if (menuBtn) {
   menuBtn.addEventListener('click', () => {
     if (mode !== 'host' || !isHost) return;
+    if (currentPhase() === 'match_end') {
+      finishVictoryHold();
+      return;
+    }
     if (serverHost) {
       net.pauseMatch();
       return;
@@ -1639,5 +1820,13 @@ loadRules();
 loadZoom();
 loadMapChoice();
 resetLocalMatch();
+const fromLink = linkCode();
+if (fromLink) {
+  showEntryPane('join');
+  codeEl.value = fromLink;
+  joinRoom(fromLink);
+} else {
+  showEntryPane('join');
+}
 applyLang();
 requestAnimationFrame(frame);

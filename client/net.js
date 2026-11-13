@@ -171,6 +171,10 @@ export function createNet(handlers) {
     };
   }
 
+  function reserveCode(code) {
+    enqueue({ t: ClientMsg.RESERVE, code: code || '' });
+  }
+
   function createRoom(opts) {
     enqueue({
       t: ClientMsg.CREATE,
@@ -178,6 +182,7 @@ export function createNet(handlers) {
       team: opts && opts.team,
       mapId: opts && opts.mapId,
       serverHost: !!(opts && opts.serverHost),
+      code: opts && opts.code,
     });
   }
 
@@ -233,6 +238,9 @@ export function createNet(handlers) {
     }
     if (!msg || typeof msg !== 'object') return;
     switch (msg.t) {
+      case ServerMsg.RESERVED:
+        emit('onReserved', typeof msg.code === 'string' ? msg.code : '');
+        break;
       case ServerMsg.CREATED:
       case ServerMsg.JOINED:
         applyWelcome(msg);
@@ -571,6 +579,7 @@ export function createNet(handlers) {
 
   return {
     connect,
+    reserveCode,
     createRoom,
     joinRoom,
     setTeam,

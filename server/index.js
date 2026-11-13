@@ -29,6 +29,8 @@ const MIME = {
 
 const rooms = new Map();
 const sessions = new Map();
+const reserved = new Map();
+const RESERVE_MS = 10 * 60 * 1000;
 const mapsById = new Map();
 const TICK_MS = DT * 1000;
 const MAX_CATCHUP = 5;
@@ -43,10 +45,24 @@ function randomString(length) {
   return out;
 }
 
+function codeTaken(code) {
+  if (rooms.has(code)) return true;
+  const hold = reserved.get(code);
+  if (!hold) return false;
+  if (hold.until > Date.now()) return true;
+  reserved.delete(code);
+  return false;
+}
+
 function roomCode() {
   let code = randomString(4);
-  while (rooms.has(code)) code = randomString(4);
+  while (codeTaken(code)) code = randomString(4);
   return code;
+}
+
+function cleanCode(code) {
+  if (typeof code !== 'string') return '';
+  return code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
 }
 
 function playerIdTaken(id) {
@@ -233,6 +249,21 @@ function scheduleTick(ms) {
   setTimeout(tickRooms, delay);
 }
 
+function handleReserve(ws, msg) {
+  if (sessions.has(ws)) {
+    fail(ws, 'already_in_room');
+    return;
+  }
+  const asked = cleanCode(msg.code);
+  if (asked && codeTaken(asked)) {
+    fail(ws, 'code_taken');
+    return;
+  }
+  const code = asked || roomCode();
+  reserved.set(code, { until: Date.now() + RESERVE_MS });
+  send(ws, { t: ServerMsg.RESERVED, code });
+}
+
 function handleCreate(ws, msg) {
   if (sessions.has(ws)) {
     fail(ws, 'already_in_room');
@@ -243,7 +274,13 @@ function handleCreate(ws, msg) {
     fail(ws, 'bad_team');
     return;
   }
-  const code = roomCode();
+  const asked = cleanCode(msg.code);
+  if (asked && rooms.has(asked)) {
+    fail(ws, 'code_taken');
+    return;
+  }
+  const code = asked || roomCode();
+  reserved.delete(code);
   const id = playerId();
   const serverHost = wantsServerHost(msg);
   const room = makeRoom(code, id, msg.mapId, serverHost);
@@ -262,11 +299,11 @@ function handleJoin(ws, msg) {
     fail(ws, 'already_in_room');
     return;
   }
-  if (typeof msg.code !== 'string' || msg.code.trim() === '') {
+  const code = cleanCode(msg.code);
+  if (!code) {
     fail(ws, 'missing_code');
     return;
   }
-  const code = msg.code.trim().toUpperCase();
   const room = rooms.get(code);
   if (!room) {
     fail(ws, 'no_room');
@@ -435,12 +472,14 @@ function handleLeave(ws) {
       send(p.ws, closed);
     }
     rooms.delete(room.code);
+    reserved.delete(room.code);
     console.log(`room close ${room.code}`);
     return;
   }
 
   if (room.players.size === 0) {
     rooms.delete(room.code);
+    reserved.delete(room.code);
     console.log(`room close ${room.code}`);
     return;
   }
@@ -535,6 +574,9 @@ wss.on('connection', (ws) => {
     }
     if (!msg || typeof msg !== 'object') return;
     switch (msg.t) {
+      case ClientMsg.RESERVE:
+        handleReserve(ws, msg);
+        break;
       case ClientMsg.CREATE:
         handleCreate(ws, msg);
         break;

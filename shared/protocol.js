@@ -1,5 +1,6 @@
 export const ClientMsg = {
   CREATE: 'create',
+  RESERVE: 'reserve',
   JOIN: 'join',
   SIGNAL: 'signal',
   RELAY: 'relay',
@@ -14,6 +15,7 @@ export const ClientMsg = {
 };
 export const ServerMsg = {
   CREATED: 'created',
+  RESERVED: 'reserved',
   JOINED: 'joined',
   ROSTER: 'roster',
   SIGNAL: 'signal',

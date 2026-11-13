@@ -645,8 +645,15 @@ function drawHud(ctx, hud, cssW, cssH) {
   drawAmmo(ctx, hud.ammo);
 }
 
+function roundLost(hud) {
+  return hud.phase === 'round_end'
+    && (hud.selfTeam === 'red' || hud.selfTeam === 'blue')
+    && hud.winner
+    && hud.winner !== hud.selfTeam;
+}
+
 function bannerTitle(hud) {
-  if (hud.phase === 'round_end') return t('roundWin');
+  if (hud.phase === 'round_end') return roundLost(hud) ? t('wasted') : t('roundWin');
   return hud.message ? String(hud.message) : '';
 }
 
@@ -655,6 +662,7 @@ function drawMatchBanner(ctx, hud, cssW, cssH) {
   const red = score.red == null ? 0 : score.red;
   const blue = score.blue == null ? 0 : score.blue;
   const winner = hud.winner === 'blue' ? 'blue' : 'red';
+  const lost = roundLost(hud);
   const title = bannerTitle(hud);
   const w = cssW > 0 ? cssW : ctx.canvas.width / (window.devicePixelRatio || 1);
   const h = cssH > 0 ? cssH : ctx.canvas.height / (window.devicePixelRatio || 1);
@@ -664,9 +672,17 @@ function drawMatchBanner(ctx, hud, cssW, cssH) {
   ctx.fillRect(0, 0, w, h);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = winner === 'blue' ? COLOR.blue : COLOR.red;
+  ctx.fillStyle = lost ? '#b9a24a' : (winner === 'blue' ? COLOR.blue : COLOR.red);
   ctx.font = '700 ' + Math.max(42, Math.min(108, w * 0.09)) + 'px sans-serif';
-  ctx.fillText(title, w / 2, h / 2 - 18);
+  if (lost) {
+    ctx.save();
+    ctx.translate(w / 2, h / 2 - 18);
+    ctx.rotate(-0.08);
+    ctx.fillText(title, 0, 0);
+    ctx.restore();
+  } else {
+    ctx.fillText(title, w / 2, h / 2 - 18);
+  }
   ctx.fillStyle = COLOR.text;
   ctx.font = '28px sans-serif';
   ctx.fillText(red + ' : ' + blue, w / 2, h / 2 + 52);

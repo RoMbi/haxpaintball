@@ -311,6 +311,8 @@
     }
     #lobby .card {
       pointer-events: auto;
+      max-height: calc(100vh - 32px);
+      overflow: auto;
       width: min(560px, calc(100vw - 32px));
       padding: 20px;
       border-radius: 12px;
@@ -338,6 +340,11 @@
       border: 1px solid #3a4450;
       border-radius: 6px;
       padding: 8px 10px;
+      box-sizing: border-box;
+    }
+    #lobby input, #lobby select {
+      width: 100%;
+      min-width: 0;
     }
     #lobby button {
       cursor: pointer;
@@ -370,6 +377,7 @@
     }
     #room-bar.visible {
       display: flex;
+      flex-wrap: wrap;
     }
     #room-code {
       flex: 1;
@@ -446,6 +454,39 @@
       flex: 0 0 auto;
       margin: 0;
       padding: 0;
+    }
+    #entry-switch {
+      display: flex;
+      gap: 8px;
+    }
+    #entry-switch button {
+      flex: 1;
+    }
+    #entry-switch button.on {
+      background: #3d7de2;
+      border-color: #3d7de2;
+      color: #fff;
+    }
+    #match-setup,
+    #host-panel,
+    #join-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #match-setup[hidden],
+    #host-panel[hidden],
+    #join-panel[hidden],
+    #entry-switch[hidden] {
+      display: none;
+    }
+    #match-id {
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+    }
+    #match-id-row button {
+      flex: 1;
     }
     #hotseat {
       position: fixed;
@@ -587,9 +628,6 @@
       flex: 1;
       min-width: 0;
     }
-    #rules-row input {
-      width: 90%;
-    }
   </style>
 </head>
 <body>
@@ -673,23 +711,10 @@
         Nick
         <input id="nick" name="nick" type="text" maxlength="16" autocomplete="nickname">
       </label>
-      <label id="map-label">
-        Mapa
-        <select id="map-pick"></select>
-      </label>
-      <div class="row" id="rules-row">
-        <label id="round-time-label">
-          Czas gry (min)
-          <input id="round-time" name="round-time" type="number" min="1" max="10" step="1" value="3">
-        </label>
-        <label id="wins-needed-label">
-          Punkty do wygranej
-          <input id="wins-needed" name="wins-needed" type="number" min="1" max="20" step="1" value="5">
-        </label>
-      </div>
       <div id="room-bar">
         <span id="room-code"></span>
         <button type="button" id="copy-code" data-i18n="copy">Kopiuj</button>
+        <button type="button" id="copy-link" data-i18n="copyLink">Kopiuj link</button>
         <button type="button" id="leave" data-i18n="leave">Wyjdź</button>
       </div>
       <div id="teams">
@@ -708,14 +733,46 @@
       </div>
       <button type="button" id="shuffle" data-i18n="shuffle">Rozlosuj</button>
       <button type="button" id="play" data-i18n="play">Graj</button>
-      <label id="server-host">
-        <input id="server-host-check" type="checkbox">
-        <span data-i18n="serverHost">Host na serwerze</span>
-      </label>
-      <button type="button" id="create" data-i18n="create">Utwórz pokój</button>
-      <div class="row" id="join-row">
-        <input id="code" name="code" type="text" maxlength="8" placeholder="kod" autocomplete="off" data-i18n-placeholder="codePlaceholder">
-        <button type="button" id="join" data-i18n="join">Dołącz</button>
+      <div id="entry-switch">
+        <button type="button" id="show-join" class="on" data-i18n="joinTab">Dołącz</button>
+        <button type="button" id="show-host" data-i18n="hostTab">Hostuj</button>
+      </div>
+      <div id="join-panel">
+        <div class="row" id="join-row">
+          <input id="code" name="code" type="text" maxlength="8" placeholder="kod" autocomplete="off" data-i18n-placeholder="codePlaceholder">
+          <button type="button" id="join" data-i18n="join">Dołącz</button>
+        </div>
+      </div>
+      <div id="host-panel" hidden>
+        <div id="match-setup">
+          <label id="map-label">
+            Mapa
+            <select id="map-pick"></select>
+          </label>
+          <div class="row" id="rules-row">
+            <label id="round-time-label">
+              Czas gry (min)
+              <input id="round-time" name="round-time" type="number" min="1" max="10" step="1" value="3">
+            </label>
+            <label id="wins-needed-label">
+              Punkty do wygranej
+              <input id="wins-needed" name="wins-needed" type="number" min="1" max="20" step="1" value="5">
+            </label>
+          </div>
+        </div>
+        <label id="match-id-label">
+          Identyfikator meczu
+          <input id="match-id" name="match-id" type="text" maxlength="8" placeholder="ABCD" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="row" id="match-id-row">
+          <button type="button" id="new-match-id" data-i18n="newMatchId">Nowy identyfikator</button>
+          <button type="button" id="copy-match-link" data-i18n="copyLink">Kopiuj link</button>
+        </div>
+        <label id="server-host">
+          <input id="server-host-check" type="checkbox">
+          <span data-i18n="serverHost">Host na serwerze</span>
+        </label>
+        <button type="button" id="create" data-i18n="create">Utwórz pokój</button>
       </div>
       <div id="status"></div>
     </form>
