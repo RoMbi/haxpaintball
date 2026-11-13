@@ -21,7 +21,7 @@ export const ServerMsg = {
   ERROR: 'error',
   SNAPSHOT: 'snapshot',
 };
-// input may include ack: last event id the sender has already painted.
+// input may include ack (last painted event) and shot (last shot edge, resent until shotAck).
 export const GameMsg = { INPUT: 'input', SNAPSHOT: 'snapshot' };
 export function encode(obj) { return JSON.stringify(obj); }
 export function decode(raw) {

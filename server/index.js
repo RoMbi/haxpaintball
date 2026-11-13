@@ -5,19 +5,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ClientMsg, ServerMsg, encode, decode } from '../shared/protocol.js';
-import { DT, SNAPSHOT_EVERY, KEY, TEAM_RED, TEAM_BLUE } from '../shared/constants.js';
+import { DT, SNAPSHOT_EVERY } from '../shared/constants.js';
 import {
   clampRules,
   createMatch,
-  addPlayer,
-  removePlayer,
   setInput,
-  canStart,
-  start,
   pauseMatch,
   step,
   snapshot,
 } from '../shared/sim.js';
+import { syncRoster, releaseDeparted, tryStart, applyRules } from '../shared/authority.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -180,28 +177,18 @@ function makeRoom(code, hostId, mapId, serverHost) {
   return room;
 }
 
-function syncMatchRoster(room) {
-  const match = room.match;
-  if (!match) return;
-  const live = new Set();
+function rosterEntries(room) {
+  const entries = [];
   for (const entry of room.players.values()) {
-    if (entry.team !== TEAM_RED && entry.team !== TEAM_BLUE) continue;
-    live.add(entry.id);
-    const disc = match.players.find((player) => player.id === entry.id);
-    if (!disc) {
-      addPlayer(match, { id: entry.id, nick: entry.nick, team: entry.team });
-      continue;
-    }
-    if (disc.team !== entry.team) {
-      removePlayer(match, entry.id);
-      addPlayer(match, { id: entry.id, nick: entry.nick, team: entry.team });
-    } else {
-      disc.nick = entry.nick;
-    }
+    entries.push({ id: entry.id, nick: entry.nick, team: entry.team });
   }
-  for (const player of match.players.slice()) {
-    if (!live.has(player.id)) removePlayer(match, player.id);
-  }
+  return entries;
+}
+
+function syncMatchRoster(room) {
+  if (!room.match) return;
+  syncRoster(room.match, rosterEntries(room));
+  releaseDeparted(room.match, rosterEntries(room));
 }
 
 function sendSnapshot(room) {
@@ -364,10 +351,7 @@ function handleRules(ws, msg) {
   if (!sess) return;
   const room = rooms.get(sess.code);
   if (!room || !room.serverHost || sess.playerId !== room.hostId || !room.match) return;
-  if (room.match.phase !== 'waiting' && room.match.phase !== 'match_end') return;
-  const rules = clampRules(msg);
-  room.match.rules = rules;
-  room.match.timeLeft = rules.roundTime;
+  if (!applyRules(room.match, clampRules(msg))) return;
   sendSnapshot(room);
 }
 
@@ -376,16 +360,10 @@ function handleStart(ws) {
   if (!sess) return;
   const room = rooms.get(sess.code);
   if (!room || !room.serverHost || sess.playerId !== room.hostId || !room.match) return;
-  if (room.match.phase === 'paused') {
-    start(room.match);
-    sendSnapshot(room);
-    return;
-  }
-  if (!canStart(room.match)) {
+  if (!tryStart(room.match)) {
     fail(ws, 'need_both_teams');
     return;
   }
-  start(room.match);
   sendSnapshot(room);
 }
 
@@ -397,12 +375,8 @@ function handleInput(ws, msg) {
   const mask = Number(msg.mask);
   const seq = Number(msg.seq);
   if (!Number.isFinite(mask) || !Number.isFinite(seq)) return;
-  setInput(room.match, sess.playerId, mask & 0xffff, seq);
-  if ((mask & KEY.SHOOT) === 0) return;
-  if (sess.playerId !== room.hostId) return;
-  if (room.match.phase !== 'match_end' && room.match.phase !== 'waiting') return;
-  if (!canStart(room.match)) return;
-  start(room.match);
+  const shotSeq = Number(msg.shot);
+  setInput(room.match, sess.playerId, mask & 0xffff, seq, Number.isFinite(shotSeq) ? shotSeq : 0);
 }
 
 function handleSignal(ws, msg) {

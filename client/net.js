@@ -484,16 +484,18 @@ export function createNet(handlers) {
     pendingIce.clear();
   }
 
-  function sendInput(seq, mask, ack) {
+  function sendInput(seq, mask, ack, shot) {
     if (state.serverHost) {
       const msg = { t: ClientMsg.INPUT, seq, mask };
       if (ack != null) msg.ack = ack | 0;
+      if (shot != null) msg.shot = shot | 0;
       sendWs(msg);
       return;
     }
     if (state.isHost) return;
     const packet = { t: GameMsg.INPUT, seq, mask };
     if (ack != null) packet.ack = ack | 0;
+    if (shot != null) packet.shot = shot | 0;
     if (channelOpen(state.hostId)) {
       const peer = peers.get(state.hostId);
       try {

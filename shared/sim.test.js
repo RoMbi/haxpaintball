@@ -328,6 +328,25 @@ test('addPlayer w trakcie rundy stawia na spawnie — to nie jest zmiana drużyn
   assert.equal(match.phase, 'playing');
 });
 
+test('zgubiony pakiet strzału nie gubi strzału, powtórzony nie daje drugiego', () => {
+  const { match, red } = makePlaying(boxMap());
+  place(red, 200, 300, { x: 1, y: 0 });
+  red.invuln = 0;
+  red.ammo = 50;
+  red.cooldown = 0;
+  // The mask that carried the edge never arrives. Later packets only repeat shotSeq.
+  setInput(match, red.id, 0, 1, 1);
+  setInput(match, red.id, 0, 2, 1);
+  step(match);
+  assert.equal(match.bullets.length, 1, 'powtórzona krawędź nie wypaliła');
+  assert.equal(red.shotAck, 1);
+  const again = snapshot(match).players.find((player) => player.id === red.id);
+  assert.equal(again.shotAck, 1);
+  setInput(match, red.id, 0, 3, 1);
+  step(match);
+  assert.equal(match.bullets.length, 1, 'ta sama krawędź wypaliła drugi raz');
+});
+
 test('ten sam tick i seq dają ten sam kąt strzału', () => {
   function shotAngle(seq) {
     const { match, red } = makePlaying(boxMap());
@@ -401,6 +420,23 @@ test('pauza końca rundy nie przyznaje drugiego punktu sama z siebie', () => {
   steps(match, pauseTicks - 1);
   assert.equal(match.phase, 'round_end');
   assert.equal(match.score.red, 1);
+});
+
+test('pauza końca rundy zjada maski, nowa runda nie odtwarza ich od spawnu', () => {
+  const { match, red, blue } = makePlaying(boxMap(), { rules: { roundTime: 60, winsNeeded: 3 } });
+  blue.alive = false;
+  step(match);
+  assert.equal(match.phase, 'round_end');
+  const pauseTicks = Math.ceil(ROUND_END_PAUSE / DT);
+  for (let i = 0; i < pauseTicks; i += 1) {
+    setInput(match, red.id, KEY.RIGHT, 1000 + i);
+    step(match);
+  }
+  step(match);
+  assert.equal(match.phase, 'playing');
+  const spawn = match.map.spawns.red[red.spawnSlot % match.map.spawns.red.length];
+  assert.ok(Math.hypot(red.x - spawn.x, red.y - spawn.y) < 1, `spawn drift ${red.x},${red.y}`);
+  assert.equal(red.appliedSeq, 1000 + pauseTicks - 1);
 });
 
 let failed = 0;

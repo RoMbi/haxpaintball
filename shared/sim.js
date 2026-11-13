@@ -109,6 +109,8 @@ export function addPlayer(match, { id, nick, team }) {
     mask: 0,
     // Last ~32 masks, keyed by seq. A late packet fills its own tick; a gap keeps the previous mask.
     inputLog: null,
+    // Highest shot edge already consumed. A resent packet must not fire twice.
+    shotAck: 0,
     spawnSlot: slot,
     r: PLAYER_RADIUS,
   };
@@ -124,7 +126,7 @@ export function removePlayer(match, id) {
   match.bullets = match.bullets.filter((bullet) => bullet.owner !== id);
 }
 
-export function setInput(match, id, mask, seq) {
+export function setInput(match, id, mask, seq, shotSeq) {
   const player = match.players.find((item) => item.id === id);
   if (!player) return;
   const nextSeq = seq | 0;
@@ -134,6 +136,12 @@ export function setInput(match, id, mask, seq) {
   // Keep the mask on the seq it was sampled. A newer packet must not overwrite it.
   if (!player.inputLog.has(nextSeq)) player.inputLog.set(nextSeq, nextMask & 0xffff);
   if (nextSeq > (player.seq | 0)) player.seq = nextSeq;
+  // Shot is an edge, so a lost packet is not covered by "keep the previous mask".
+  // The sender repeats the same shotSeq until shotAck comes back.
+  if (Number.isFinite(shotSeq)) {
+    const shot = shotSeq | 0;
+    if (shot > (player.shotSeq | 0)) player.shotSeq = shot;
+  }
   while (player.inputLog.size > INPUT_LOG) {
     let oldest = nextSeq;
     for (const key of player.inputLog.keys()) {
@@ -167,6 +175,23 @@ export function takeInput(player) {
     if (key <= (player.appliedSeq | 0)) player.inputLog.delete(key);
   }
   return player.mask | 0;
+}
+
+// A shot is an edge. The mask bit is not enough: a lost packet never becomes
+// that edge, and a resent packet must not become a second one.
+// shotSeq is the sample on which the key went down. It stays on every later
+// packet until shotAck catches it. Cooldown, ammo and invuln still gate the spawn.
+export function shotWanted(player, mask) {
+  const shooting = (mask & KEY.SHOOT) !== 0;
+  const pending = (player.shotSeq | 0) > (player.shotAck | 0);
+  if (!shooting && !pending) return false;
+  if (player.triggerWasDown && !pending) return false;
+  return true;
+}
+
+export function noteShot(player) {
+  const seq = player.shotSeq | 0;
+  if (seq > (player.shotAck | 0)) player.shotAck = seq;
 }
 
 export function canStart(match) {
@@ -277,6 +302,9 @@ export function step(match) {
     }
     resolveCrowd(match);
   } else if (match.phase === 'round_end') {
+    // The pause does not move anyone, but it still has to consume masks.
+    // Otherwise the next round replays the whole pause as a lunge off spawn.
+    for (const player of match.players) takeInput(player, match.tick);
     match.pause -= DT;
     if (match.pause <= 0) {
       match.pause = 0;
@@ -296,10 +324,11 @@ export function step(match) {
       player.cooldown = Math.max(0, player.cooldown - DT);
       player.invuln = Math.max(0, player.invuln - DT);
       tickReload(player);
-      const shooting = (mask & KEY.SHOOT) !== 0;
+      const shooting = shotWanted(player, mask);
       if (!shooting) player.triggerWasDown = false;
       if (shooting && player.cooldown <= 0 && player.invuln <= 0 && !player.reloading && player.ammo > 0) {
         if (spawnBullet(match, player)) {
+          noteShot(player);
           player.ammo -= 1;
           const tapped = !player.triggerWasDown;
           // Holding stays at the old rate. A fresh click only waits out the short floor.
@@ -363,6 +392,7 @@ export function snapshot(match, opts) {
       invuln: roundTenth(player.invuln),
       // Seq the referee already consumed. The owner replays only masks after this.
       ack: player.appliedSeq | 0,
+      shotAck: player.shotAck | 0,
       ammo: player.ammo,
       reloading: player.reloading,
       reloadLeft: roundTenth(player.reloadLeft),

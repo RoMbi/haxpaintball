@@ -9,31 +9,19 @@ import {
   TEAM_RED,
   TEAM_BLUE,
   TEAM_SPEC,
-  PLAYER_RADIUS,
-  BULLET_RADIUS,
-  BULLET_SPEED,
-  BULLET_INHERIT,
   BULLET_LIFE,
-  BULLET_COOLDOWN,
-  BULLET_TAP_RATE,
   BULLET_SPIN,
-  MARKER_ALONG,
-  MARKER_RIGHT,
-  MARKER_TIP,
 } from '../shared/constants.js';
 import {
   createMatch,
   clampRules,
   addPlayer,
-  removePlayer,
   setInput,
   canStart,
   start,
-  pauseMatch,
-  applyInput,
-  integratePlayer,
   step,
 } from './host.js';
+import { syncRoster, releaseDeparted } from '../shared/authority.js';
 import { MAP_WASD, MAP_IJKL, createInput } from './input.js';
 import { createRenderer, getZoom, setZoom, loadZoom } from './render.js';
 import { t, loadLang, setLang, mapName, matchMessage, serverError } from './i18n.js';
@@ -55,12 +43,6 @@ const INTERP_DELAY_MAX = 0.15;
 const INTERP_QUIET_MS = 2000;
 const SNAP_BUFFER = 32;
 const INPUT_HISTORY = 32;
-// Own disc is predicted. A snapshot is the past; only masks after it are replayed.
-// Past this the replay and the live body disagree hard enough to snap (spawn, shove).
-const CORRECT_SNAP = 80;
-// Own shot is drawn from the muzzle on the tick the key went down.
-// The referee copy of that shot is already in the past, so it is not drawn.
-const LOCAL_BULLETS = 8;
 
 const canvas = document.querySelector('#view');
 const lobbyEl = document.querySelector('#lobby');
@@ -121,14 +103,10 @@ let seenDeathId = 0;
 let hostEventAcks = new Map();
 let renderDelay = INTERP_DELAY * 1000;
 let delayQuietSince = 0;
-// Local body for anyone who is not the referee. Rendered live, corrected from snapshots.
-let predicted = null;
-let predictedAck = 0;
-// Last input the live body has already stepped. Replay must not step it again.
-let predictedSeq = 0;
-let localBullets = [];
-let triggerWasDown = false;
-let shotCooldown = 0;
+// Shot is an edge. It stays on every packet until the referee's shotAck catches it.
+let shotSeq = 0;
+let shotAck = 0;
+let shotWasDown = false;
 
 const metrics = createClientMetrics();
 const net = createNet({
@@ -392,10 +370,9 @@ function resetLocalMatch() {
   paint = [];
   seenEventId = 0;
   seenDeathId = 0;
-  predicted = null;
-  predictedAck = 0;
-  predictedSeq = 0;
-  clearLocalShots();
+  shotSeq = 0;
+  shotAck = 0;
+  shotWasDown = false;
   showLobby(true);
 }
 
@@ -413,14 +390,6 @@ function syncLocalNick() {
   if (self) self.nick = nickOr(t('red'));
 }
 
-function tryStart() {
-  if (mode === 'host') {
-    renderTeams();
-    return;
-  }
-  if (!match || mode === 'guest') return;
-}
-
 function rosterOpen() {
   const phase = serverHost || mode === 'guest'
     ? (latestSnap && latestSnap.phase)
@@ -429,50 +398,10 @@ function rosterOpen() {
   return phase === 'waiting' || phase === 'match_end';
 }
 
-function dropDisc(player) {
-  player.alive = false;
-  player.mask = 0;
-  player.vx = 0;
-  player.vy = 0;
-}
-
 function syncHostDiscs() {
   if (serverHost || mode !== 'host' || !match) return;
-  const open = rosterOpen();
-  const live = new Set();
-  for (const entry of roster) {
-    if (teamOf(entry.team) === TEAM_SPEC) continue;
-    live.add(entry.id);
-    if (!open) continue;
-    const disc = match.players.find((player) => player.id === entry.id);
-    if (!disc) {
-      addPlayer(match, { id: entry.id, nick: entry.nick, team: entry.team });
-      continue;
-    }
-    if (disc.team !== entry.team) {
-      removePlayer(match, entry.id);
-      addPlayer(match, { id: entry.id, nick: entry.nick, team: entry.team });
-    } else {
-      disc.nick = entry.nick;
-    }
-  }
-  for (const player of match.players.slice()) {
-    if (live.has(player.id)) continue;
-    if (open) removePlayer(match, player.id);
-    else dropDisc(player);
-  }
-  tryStart();
-}
-
-function releaseHostDeparted() {
-  if (serverHost || mode !== 'host' || !match || match.phase !== 'round_end') return;
-  const live = new Set();
-  for (const entry of roster) {
-    if (teamOf(entry.team) !== TEAM_SPEC) live.add(entry.id);
-  }
-  for (const player of match.players.slice()) {
-    if (!live.has(player.id)) removePlayer(match, player.id);
-  }
+  syncRoster(match, roster);
+  releaseDeparted(match, roster);
 }
 
 function ingestHits(events) {
@@ -744,25 +673,18 @@ function fieldVisible() {
   return !!(match && (match.phase === 'playing' || match.phase === 'round_end'));
 }
 
-function needsPrediction() {
+function remoteView() {
   return mode === 'guest' || serverHost;
 }
 
 function buildView() {
   const visibleMap = fieldVisible() ? map : null;
-  if (needsPrediction() && latestSnap) {
+  if (remoteView() && latestSnap) {
     const span = interpSpan(performance.now());
-    const players = span ? drawPlayersFromSpan(span) : [];
-    if (predicted && predicted.alive) {
-      const idx = players.findIndex((player) => player.id === selfId);
-      const body = drawPredicted();
-      if (idx >= 0) players[idx] = body;
-      else players.push(body);
-    }
     return {
       map: visibleMap,
-      players,
-      bullets: span ? drawOwnShots(drawBulletsFromSpan(span)) : localBullets.slice(),
+      players: span ? drawPlayersFromSpan(span) : [],
+      bullets: span ? drawBulletsFromSpan(span) : [],
       paint,
       selfId,
       los: true,
@@ -783,18 +705,18 @@ function buildView() {
 function stepLocalOrHost() {
   syncLocalNick();
   ensureHotseat();
+  releaseDeparted(match, roster);
   const red = match.players.find((player) => player.id === (mode === 'local' ? LOCAL_RED : selfId));
   if (red && (mode === 'local' || mode === 'host')) {
     const mask = wasd.sample();
     inputSeq += 1;
-    setInput(match, red.id, mask, inputSeq);
+    noteShotEdge(mask);
+    setInput(match, red.id, mask, inputSeq, shotSeq);
   }
   if (mode === 'local') {
     const blue = match.players.find((player) => player.id === LOCAL_BLUE);
     if (blue) setInput(match, LOCAL_BLUE, ijkl.sample(), match.tick + 1);
   }
-  tryStart();
-  releaseHostDeparted();
   step(match);
   paintFromMatch();
 }
@@ -810,225 +732,42 @@ function flushHostSnapshot(force) {
 
 function rememberInput(seq, mask) {
   const bits = mask | 0;
-  // One entry per sampled tick. The shoot bit stays on the tick the key went down.
   sentInputs.push({ seq, mask: bits });
   if (sentInputs.length > INPUT_HISTORY) sentInputs.shift();
   return bits;
 }
 
-function dropAckedInputs(ack) {
-  const confirmed = ack | 0;
-  if (confirmed > predictedAck) predictedAck = confirmed;
-  while (sentInputs.length && sentInputs[0].seq <= predictedAck) sentInputs.shift();
+// The key going down is the edge. Later packets repeat the same shotSeq until
+// the referee answers with shotAck, so a lost packet is not a lost shot.
+function noteShotEdge(mask) {
+  const down = (mask & KEY.SHOOT) !== 0;
+  if (down && !shotWasDown) shotSeq += 1;
+  shotWasDown = down;
+  return shotSeq;
 }
 
-function seedPredicted(raw) {
-  const body = hydratePlayer(raw);
-  if (!body) return null;
-  body.alive = raw.alive !== false;
-  body.vx = Number(raw.vx) || 0;
-  body.vy = Number(raw.vy) || 0;
-  body.invuln = Number(raw.invuln) || 0;
-  body.cooldown = 0;
-  body.triggerWasDown = false;
-  return body;
-}
-
-function drawPredicted() {
-  const known = rosterOf(selfId);
-  return {
-    ...predicted,
-    id: selfId,
-    nick: known ? known.nick : (predicted.nick || ''),
-    team: known && known.team ? known.team : (predicted.team || pickedTeam),
-    facing: facingOf(predicted.fx, predicted.fy),
-  };
-}
-
-// Snapshot pose is where we were when the referee consumed ack. Replaying the
-// masks after that is where we should be now. Comparing the live body to the
-// snapshot measures lag, not error, and a snap there never converges.
-function reconcileDetail(where, remote, ahead) {
-  const phase = latestSnap && latestSnap.phase ? latestSnap.phase : '';
-  const localAlive = predicted && predicted.alive ? 'L' : 'l';
-  const remoteAlive = remote && remote.alive !== false ? 'R' : 'r';
-  return {
-    where,
-    phase,
-    alive: localAlive + remoteAlive,
-    ahead: ahead | 0,
-    tick: latestSnap ? latestSnap.tick | 0 : 0,
-    invuln: remote ? Number(remote.invuln) || 0 : 0,
-  };
-}
-
-function correctPredicted(remote) {
-  if (!predicted || !remote) return;
-  if (remote.alive === false || !predicted.alive) {
-    predicted = seedPredicted(remote);
-    predicted.alive = remote.alive !== false;
-    predicted.vx = 0;
-    predicted.vy = 0;
-    predictedSeq = predictedAck;
-    metrics.noteReconcile(0, reconcileDetail('dead', remote, 0));
-    return;
-  }
-  const field = predictMap();
-  const body = seedPredicted(remote);
-  if (!body || !field) return;
-  // Replay only masks the live body has not stepped. inputSeq - ack counts
-  // ticks still sitting in the send buffer, and stepping those again yanks
-  // the disc back to where it was a round-trip ago.
-  const ahead = Math.max(0, predictedSeq - (predictedAck | 0));
-  replayUnacked(body, field, ahead);
-  const dx = body.x - predicted.x;
-  const dy = body.y - predicted.y;
-  const err = Math.hypot(dx, dy);
-  metrics.noteReconcile(err, reconcileDetail('replay', remote, ahead));
-  // Small error is rounding and a shove the replay cannot see. Snapping the
-  // live body to the replay every snapshot is the stutter. A real desync
-  // (spawn, wall) is the only time the disc is allowed to move.
-  if (err >= CORRECT_SNAP) {
-    predicted.x = body.x;
-    predicted.y = body.y;
-    predicted.vx = body.vx;
-    predicted.vy = body.vy;
-    predicted.fx = body.fx;
-    predicted.fy = body.fy;
-  }
-  if (remote.invuln != null) predicted.invuln = Number(remote.invuln) || 0;
-}
-
-// Replay masks the referee has not consumed yet, on top of the confirmed pose.
-// Shots stay with the referee. This only moves the local disc.
-function replayUnacked(body, field, pending) {
-  const mapField = field || predictMap();
-  if (!body || !mapField) return;
-  const steps = pending | 0;
-  if (steps < 1) return;
-  // Newest masks are the ones the referee has not consumed. A late packet
-  // already left the buffer, so replaying the whole history double-counts.
-  const start = Math.max(0, sentInputs.length - steps);
-  for (let i = start; i < sentInputs.length; i += 1) {
-    applyInput(body, sentInputs[i].mask, DT);
-    integratePlayer(body, mapField, DT);
-  }
-}
-
-function predictMap() {
-  if (map) return map;
-  return mapsById.get(mapId) || null;
-}
-
-function stepPredicted(mask) {
-  const field = predictMap();
-  if (!predicted || !predicted.alive || !field) return;
-  if (pickedTeam === TEAM_SPEC) return;
-  predictedSeq = inputSeq;
-  applyInput(predicted, mask, DT);
-  if (map) integratePlayer(predicted, field, DT);
-  else {
-    predicted.x += predicted.vx * DT;
-    predicted.y += predicted.vy * DT;
-  }
-  fireLocal(mask);
-}
-
-function clearLocalShots() {
-  localBullets = [];
-  triggerWasDown = false;
-  shotCooldown = 0;
-}
-
-function fireLocal(mask) {
-  const shooting = (mask & KEY.SHOOT) !== 0;
-  shotCooldown = Math.max(0, shotCooldown - DT);
-  if (!shooting) {
-    triggerWasDown = false;
-    return;
-  }
-  if (triggerWasDown || shotCooldown > 0) return;
-  if (!predicted || !predicted.alive) return;
-  const remote = latestSnap && findSnapPlayer(latestSnap, selfId);
-  if (remote && (remote.reloading || remote.ammo === 0 || remote.alive === false)) return;
-  if (remote && remote.invuln > 0) return;
-  const shot = muzzleShot(predicted);
-  if (!shot) return;
-  localBullets.push(shot);
-  while (localBullets.length > LOCAL_BULLETS) localBullets.shift();
-  triggerWasDown = true;
-  shotCooldown = BULLET_TAP_RATE;
-}
-
-function muzzleShot(body) {
-  let fx = body.fx;
-  let fy = body.fy;
-  const flen = Math.hypot(fx, fy);
-  if (flen < 1e-8) {
-    fx = 1;
-    fy = 0;
-  } else {
-    fx /= flen;
-    fy /= flen;
-  }
-  const gripX = body.x + fx * PLAYER_RADIUS * MARKER_ALONG - fy * PLAYER_RADIUS * MARKER_RIGHT;
-  const gripY = body.y + fy * PLAYER_RADIUS * MARKER_ALONG + fx * PLAYER_RADIUS * MARKER_RIGHT;
-  const muzzle = MARKER_TIP + BULLET_RADIUS + 1;
-  return {
-    local: true,
-    owner: selfId,
-    team: body.team || pickedTeam,
-    x: gripX + fx * muzzle,
-    y: gripY + fy * muzzle,
-    vx: fx * BULLET_SPEED + body.vx * BULLET_INHERIT,
-    vy: fy * BULLET_SPEED + body.vy * BULLET_INHERIT,
-    life: BULLET_LIFE,
-    angle: 0,
-    spin: 1,
-  };
-}
-
-function stepLocalBullets() {
-  if (!localBullets.length) return;
-  const kept = [];
-  for (const bullet of localBullets) {
-    bullet.life -= DT;
-    if (bullet.life <= 0) continue;
-    bullet.x += bullet.vx * DT;
-    bullet.y += bullet.vy * DT;
-       bullet.angle = tumbleAngle(bullet.life, bullet.spin);  kept.push(bullet);
-  }
-  localBullets = kept;
-}
-
-// Referee copies of our shots spawn where we were, not where we are. Drop them.
-function drawOwnShots(remote) {
-  stepLocalBullets();
-  const others = [];
-  for (const bullet of remote) {
-    if (bullet.owner === selfId) continue;
-    others.push(bullet);
-  }
-  return others.concat(localBullets);
+function takeShotAck(snap) {
+  const remote = findSnapPlayer(snap, selfId);
+  if (!remote || !Number.isFinite(Number(remote.shotAck))) return;
+  const ack = remote.shotAck | 0;
+  if (ack > shotAck) shotAck = ack;
 }
 
 function stepGuest() {
   if (pickedTeam === TEAM_SPEC) {
-    predicted = null;
-    predictedSeq = 0;
-    clearLocalShots();
+    shotWasDown = false;
     if (seenEventId > sentAck) {
       sentAck = seenEventId;
-      net.sendInput(inputSeq, 0, seenEventId);
+      net.sendInput(inputSeq, 0, seenEventId, shotSeq);
     }
     return;
   }
   inputSeq += 1;
-  const down = latestSnap && latestSnap.phase === 'playing' && predicted && predicted.alive;
-  const mask = rememberInput(inputSeq, down ? wasd.sample() : 0);
+  const playing = latestSnap && latestSnap.phase === 'playing';
+  const mask = rememberInput(inputSeq, playing ? wasd.sample() : 0);
+  noteShotEdge(mask);
   sentAck = seenEventId;
-  net.sendInput(inputSeq, mask, seenEventId);
-  stepPredicted(mask);
+  net.sendInput(inputSeq, mask, seenEventId, shotSeq);
 }
 
 function tickMatch() {
@@ -1054,12 +793,9 @@ function onWelcome(state) {
   hostEventAcks = new Map();
   renderDelay = INTERP_DELAY * 1000;
   delayQuietSince = 0;
-  predicted = null;
-  predictedAck = 0;
-  predictedSeq = 0;
-  localBullets = [];
-  triggerWasDown = false;
-  shotCooldown = 0;
+  shotSeq = 0;
+  shotAck = 0;
+  shotWasDown = false;
   latestSnap = null;
   latestSnapAt = 0;
   snapBuffer = [];
@@ -1109,7 +845,8 @@ function onGame(msg, fromId) {
   if (!msg) return;
   if (msg.t === 'input') {
     if (serverHost || mode !== 'host' || !match) return;
-    setInput(match, msg.id || fromId, msg.mask, msg.seq);
+    const shot = Number(msg.shot);
+    setInput(match, msg.id || fromId, msg.mask, msg.seq, Number.isFinite(shot) ? shot : 0);
     if (fromId && Number.isFinite(Number(msg.ack))) {
       const ack = msg.ack | 0;
       if (ack > (hostEventAcks.get(fromId) || 0)) hostEventAcks.set(fromId, ack);
@@ -1132,57 +869,10 @@ function onGame(msg, fromId) {
       if (map !== next) map = next;
     }
     paintFromSnapshot(snap);
-    if (needsPrediction()) adoptPrediction(snap);
+    if (remoteView()) takeShotAck(snap);
     if (snap.phase === 'playing' || snap.phase === 'round_end') showLobby(false);
     else showLobby(true);
   }
-}
-
-function spawnedAway(local, remote) {
-  if (!local || !remote || remote.alive === false) return false;
-  const dx = remote.x - local.x;
-  const dy = remote.y - local.y;
-  return dx * dx + dy * dy >= CORRECT_SNAP * CORRECT_SNAP;
-}
-
-function adoptPrediction(snap) {
-  if (pickedTeam === TEAM_SPEC) {
-    predicted = null;
-    predictedSeq = 0;
-    clearLocalShots();
-    return;
-  }
-  // round_end is the pause before the spawn teleport. Predicting through it
-  // leaves the disc on the corpse, then the next playing snapshot is a hard snap.
-  if (snap.phase !== 'playing') {
-    clearLocalShots();
-    sentInputs.length = 0;
-  }
-  const remote = findSnapPlayer(snap, selfId);
-  if (!remote) return;
-  const ack = Number.isFinite(Number(remote.ack)) ? remote.ack | 0 : predictedAck;
-  dropAckedInputs(ack);
-  // A new round puts the disc on a spawn. The live body is still at the old
-  // spot, and replaying unacked masks from there is the delayed lunge.
-  const respawned = (Number(remote.invuln) || 0) > 0 && (Number(predicted && predicted.invuln) || 0) <= 0;
-  if (!predicted || !predicted.alive || remote.alive === false || snap.phase !== 'playing' || snap.tick <= 2 || respawned) {
-    const dx = predicted ? remote.x - predicted.x : 0;
-    const dy = predicted ? remote.y - predicted.y : 0;
-    const jump = predicted ? Math.hypot(dx, dy) : 0;
-    predicted = seedPredicted(remote);
-    predictedSeq = predictedAck;
-    metrics.noteReconcile(jump, reconcileDetail('reset', remote, 0));
-    return;
-  }
-  if (spawnedAway(predicted, remote)) {
-    const dx = remote.x - predicted.x;
-    const dy = remote.y - predicted.y;
-    predicted = seedPredicted(remote);
-    predictedSeq = predictedAck;
-    metrics.noteReconcile(Math.hypot(dx, dy), reconcileDetail('spawn', remote, 0));
-    return;
-  }
-  correctPredicted(remote);
 }
 
 function leaveRoomToSandbox(message) {
